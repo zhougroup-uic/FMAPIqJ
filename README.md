@@ -59,6 +59,7 @@ examples/n200_test/run.sh [workdir]         # test example; MODE=cpu to force th
 examples/n800_production/run.sh [workdir]   # production example
 # notebooks (Julia kernel; MODE gpu/64 runs or cpu/3 runs):
 #   examples/n200_test/n200_test.ipynb         runs the pipeline
+#   examples/n200_test/n200_test.cached.ipynb  same notebook with stored outputs of a Colab T4 run (64 runs, ~10 min, PASS)
 ```
 Both use `examples/cenA.pqr` (1959 atoms), build the maps, simulate, compute I(q) and compare
 `Iqs.stat.txt` with `expected/Iqs.stat.n<runs>.txt` via `tools/check_result.jl` (prints PASS/FAIL). The N=800
@@ -77,6 +78,7 @@ If you already have your own Julia kernel, pick it in Jupyter's *Kernel → Chan
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/zhougroup-uic/FMAPIqJ/blob/main/examples/n200_test/n200_test.ipynb)
 The notebook declares the `julia` kernel, which Colab starts itself; its first code cell clones this repository into `/content`.
 Choose a GPU runtime (T4, 16 GB): the N=200 example fits; the N=800 production grid (984³) needs a larger GPU.
+[`n200_test.cached.ipynb`](examples/n200_test/n200_test.cached.ipynb) is the same notebook with the outputs of a Colab T4 run stored (64 runs, about 10 min, check PASS), for reading without a GPU.
 
 ## Layout
 ```
