@@ -1,0 +1,24 @@
+
+[deps]
+Adapt = "79e6a3ab-5dfb-504d-930d-738a2a938a0e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Tar = "a4e569a6-e804-4fa4-b0f3-eef7a1d5b13e"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Adapt = "4.7.4"
+CUDA = "6.4.2"
+CodecZlib = "0.7.9"
+FFTW = "1.10.0"
+JSON = "1.10.0"
+StaticArrays = "1.9.23"
+julia = "1.9"

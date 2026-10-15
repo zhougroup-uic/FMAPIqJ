@@ -1,0 +1,3 @@
+#!/usr/bin/env julia
+# GPU NVT Monte Carlo (CUDA.jl): N box_list TE_list n_cycles seed start stop sample_freq fmap.paths ...
+include(joinpath(@__DIR__, "..", "src", "sim", "gpu", "main_nvt_gpu.jl"))
