@@ -35,6 +35,17 @@ function main_fmap(argv::Vector{String})
         zprefix = argv[k+1]
         argv = [argv[i] for i in eachindex(argv) if i != k && i != k + 1]
     end
+    # --poses FILE --ecut E: also write the grid cells below E (kcal/mol) as pose lines (fmap.log format, SelErn of the C code)
+    posefile = nothing; ecut = nothing
+    if (k = findfirst(==("--poses"), argv)) !== nothing && k < length(argv)
+        posefile = argv[k+1]
+        argv = [argv[i] for i in eachindex(argv) if i != k && i != k + 1]
+    end
+    if (k = findfirst(==("--ecut"), argv)) !== nothing && k < length(argv)
+        ecut = parse(Float64, argv[k+1])
+        argv = [argv[i] for i in eachindex(argv) if i != k && i != k + 1]
+    end
+    (posefile === nothing) == (ecut === nothing) || (println(stderr, "--poses and --ecut go together"); return 1)
     level = parse(Int, get(ENV, "FMAP_GZ_LEVEL", "1"))
     if length(argv) < 3
         println(stderr, "Usage: fmap subA.vdw parms.txt ang.dat [fnamepat] [subB.vdw] [--zlib PREFIX]")
@@ -64,9 +75,14 @@ function main_fmap(argv::Vector{String})
     crds = scale_coordinates(crds, dx); pros = scale_coordinates(pros, dx)
     angles = read_angles(ang_file)
     @printf(stderr, "Loaded: %d crds, %d pros, %d rotations\n", length(crds), length(pros), length(angles))
-    if zprefix === nothing
+    if zprefix === nothing && posefile === nothing
         d = dirname(fnamepat)
         isempty(d) || mkpath(d)
+    end
+    pio = nothing
+    if posefile !== nothing
+        pio = open(posefile, "w")
+        write_pose_header(pio, blen, dx, subA, subB === nothing ? subA : subB)
     end
 
     ctx = if get(ENV, "FMAPB2_GPU", "0") in ("", "0")
@@ -76,7 +92,15 @@ function main_fmap(argv::Vector{String})
         Base.invokelatest(make_ctx, blen, Val(true))
     end
     println(stderr, "Processing orientations...(check output file for progress)")
-    if zprefix === nothing
+    if zprefix === nothing && posefile !== nothing
+        npose = 0
+        for (i, ang) in enumerate(angles)
+            rotated = rotate_atoms(pros, euler_to_rotmat(ang[1], ang[2], ang[3]))
+            Base.invokelatest(softgrd, ctx, crds, rotated, dx, sol)
+            npose += Base.invokelatest(select_poses, pio, ctx, ang, ecut)
+        end
+        @printf(stderr, "poses below %.3f kcal/mol: %d\n", ecut, npose)
+    elseif zprefix === nothing
         # per-orientation gzip files; compression of one orientation overlaps the next one's computation
         slots = Channel{Nothing}(max(1, Threads.nthreads() - 1))
         tasks = Task[]
@@ -102,9 +126,12 @@ function main_fmap(argv::Vector{String})
         write_ve_zlib(zprefix, parms_file, angles, level) do i
             ang = angles[i]
             rotated = rotate_atoms(pros, euler_to_rotmat(ang[1], ang[2], ang[3]))
-            Base.invokelatest(softgrd, ctx, crds, rotated, dx, sol)
+            g = Base.invokelatest(softgrd, ctx, crds, rotated, dx, sol)
+            pio === nothing || Base.invokelatest(select_poses, pio, ctx, ang, ecut)
+            g
         end
     end
+    pio === nothing || close(pio)
     println()
     println(stderr, "Completed successfully!")
     return 0
@@ -128,5 +155,34 @@ function main_pack(argv::Vector{String})
         end
     end
     pack(argv[1], prefix; level)
+    return 0
+end
+
+"""
+fmapdd poses.txt parms.txt [--atm]: pair energies of the poses (fmapdd), with `--atm` also the per-atom sums (fmapdd.atm).
+Output on stdout in the format of the C tools: the 4 header lines, one line per pose
+`ang1 ang2 ang3 i j k score total vol ele vdw`, then (atm) the ATOM lines of the receptor and of the ligand.
+The .vdw files named in the header are read from the current directory.
+"""
+function main_fmapdd(argv::Vector{String})
+    atm = "--atm" in argv
+    args = [a for a in argv if a != "--atm"]
+    if length(args) < 2
+        println(stderr, "Usage: fmapdd poses.txt parms.txt [--atm]")
+        return 1
+    end
+    poses = read_poses(args[1])
+    params = read_parameters(args[2])
+    ps = pair_system(params, poses.l, poses.dx)
+    center(atoms, c) = [Atom(a.info, a.x - c[1], a.y - c[2], a.z - c[3], a.q, a.r, a.Asq, a.Bsq) for a in atoms]
+    rec = center(read_vdw(poses.rec), poses.rcen)
+    lig = center(read_vdw(poses.lig), poses.lcen)
+    res = pair_energies(rec, lig, poses, ps; atm)
+    write_pose_header(stdout, poses.l, poses.dx, poses.rec, poses.lig)
+    write_pair_poses(stdout, poses, res)
+    if atm
+        write_atom_lines(stdout, rec, res.rec, length(poses.ang))
+        write_atom_lines(stdout, lig, res.lig, length(poses.ang))
+    end
     return 0
 end

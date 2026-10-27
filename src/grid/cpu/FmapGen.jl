@@ -5,6 +5,7 @@
 #   softgrd.jl  : per-orientation energy grid (FFT cross-correlation, vol/ele/vdw/v12), tErn quantization
 #   pre.jl      : fmappre   (parms.txt + sub*.vdw from a PQR)
 #   pack.jl     : fmap_pack_zlib (ve/tErn.*.mat.gz + rotation tables -> fmap.{rot,ve}.zlib)
+#   pair.jl     : low-energy poses (SelErn), pair energies and residue decomposition (fmapdd, fmapdd.atm, resern/data2bf/fmappdb)
 #   cli.jl      : command-line entry points (same arguments as the python tools)
 module FmapGen
 
@@ -19,6 +20,7 @@ include("softgrd.jl")
 include("pre.jl")
 include("pack.jl")
 include("stat.jl")
+include("pair.jl")
 include("cli.jl")
 
 end # module

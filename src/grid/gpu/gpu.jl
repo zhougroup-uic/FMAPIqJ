@@ -264,3 +264,18 @@ function softgrd(ctx::GPUCtx, crds::Vector{Atom}, pros::Vector{Atom}, dx::Float6
 
     return setdtErn(ctx)
 end
+
+"Cells below `ecut` that are not excluded (same lines as the CPU method): the selection runs on the device."
+function select_poses(io::IO, ctx::GPUCtx, ang, ecut::Real)
+    mask = (.!ctx.vol) .& (ctx.combined .< ecut)
+    idx = findall(mask)
+    isempty(idx) && return 0
+    vals = Array(ctx.combined[idx])
+    ci = Array(idx)
+    order = sortperm(ci; by = c -> (c[3], c[2], c[1]))          # C order: i slowest, k fastest
+    for o in order
+        c = ci[o]
+        @printf(io, "%10.6f%10.6f%10.6f%8d%8d%8d%10.3f\n", ang[1], ang[2], ang[3], c[3] - 1, c[2] - 1, c[1] - 1, vals[o])
+    end
+    return length(order)
+end
