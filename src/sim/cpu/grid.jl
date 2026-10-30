@@ -249,6 +249,6 @@ end
 "bins -> rotation index (fmap_bins_to_rot_idx)."
 @inline function bins_to_rot_idx(c::FmapCtx, b1::Float64, b2::Float64, b3::Float64)
     n = Int64(c.nbin)
-    bi = wrap_idx(c_round_int(b1), n); bj = wrap_idx(c_round_int(b2), n); bk = wrap_idx(c_round_int(b3), n)
+    bi = wrap_idx(c_round_int(b1), n); bj = beta_idx(b2, n); bk = wrap_idx(c_round_int(b3), n)
     return Int32(@inbounds c.aidx[bi * n * n + bj * n + bk + 1])
 end

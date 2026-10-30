@@ -98,4 +98,8 @@ docs/        notes on the pipeline options
 - `TERN_BYTES` (environment, default 1 in the pipeline) selects the grid cell format; stand-alone tools
   default to 2, so export `TERN_BYTES=1` when running `simulation_nvt*` on a pipeline grid.
 - GPU results are reproducible to numerical noise (atomic adds in the grid mapping), not bit-for-bit.
+- Orientation lookup: the beta bin index is `floor(b2)` clamped to `nbin-1` (the `angijk` tables use half-bin beta
+  centres); earlier versions used `round(b2)` with wrap, which sent beta near pi to beta near 0. The result
+  shifts I(q) by at most ~2% (within the run-to-run error); the `expected/` files were regenerated with this
+  fix (GPU, 64 runs) and differ from the old ones by that amount. Same change in `reference/maeppi/fmap_energy.c`.
 - License: GPL-3.0 (see `LICENSE`).

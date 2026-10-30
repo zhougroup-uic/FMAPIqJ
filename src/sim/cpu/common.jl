@@ -6,6 +6,7 @@ const ROT_DEFAULT = 3.0       # rotation displacement in bin units (particle_fma
 const MAX_N_CTXS = 15
 const TWO_PI = 2.0 * pi
 
+
 "Grid cell format from the environment, as the C builds' -DTERN_BYTES: 2 = [elec,vdw], 1 = pre-summed."
 function tern_bytes_from_env()
     tb = parse(Int, get(ENV, "TERN_BYTES", "2"))
@@ -77,6 +78,9 @@ end
 # C: (int)round(x) (half away from zero), then (idx<0) ? idx+n : (idx>=n) ? 0 : idx
 @inline c_round_int(x::Float64) = unsafe_trunc(Int64, round(x, RoundNearestTiesAway))
 @inline wrap_idx(i::Int64, n::Int64) = i < 0 ? i + n : (i >= n ? Int64(0) : i)
+# beta index: the angijk tables use half-bin beta centres (bin j covers b2 in [j, j+1)), so floor,
+# clamped to n-1 so that b2 == n (beta = pi) stays in the last bin instead of wrapping to 0.
+@inline beta_idx(b2::Float64, n::Int64) = clamp(unsafe_trunc(Int64, floor(b2)), Int64(0), n - 1)
 
 "Sorted type pair (t1,t2) -> context index (get_ctx / ctx_index_dev); 0-based in and out."
 @inline function ctx_index(t1::Integer, t2::Integer, n_types::Integer)

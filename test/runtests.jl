@@ -2,6 +2,20 @@
 using Test
 include(joinpath(@__DIR__, "..", "src", "sim2iq", "cpu", "Sim2Iq.jl")); using .Sim2Iq
 
+include(joinpath(@__DIR__, "..", "src", "sim", "cpu", "FmapSim.jl"))
+
+@testset "beta-bin index mapping" begin
+    n = 120
+    bi(b) = FmapSim.beta_idx(b, Int64(n))
+    @test bi(5.0) == 5 && bi(5.99) == 5 && bi(60.3) == 60
+    @test bi(0.49) == 0 && bi(0.5) == 0 && bi(0.99) == 0 && bi(1.0) == 1
+    @test bi(Float64(n) - 0.5) == n - 1 && bi(prevfloat(Float64(n))) == n - 1
+    @test bi(Float64(n)) == n - 1                                           # beta = pi
+    b = FmapSim.euler_to_bins(0.0, Float64(pi), 0.0, n)
+    @test b[2] <= n && bi(b[2]) == n - 1
+    @test all(0 <= bi(x) < n for x in range(0, n, length=1001))
+end
+
 const D = joinpath(@__DIR__, "data")
 
 function readdat(f)

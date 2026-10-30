@@ -71,7 +71,8 @@ end
 # C: bins_to_rot_idx_dev - ai is angle_indices, flat nbin^3, 0-based.
 @inline function bins_to_rot_idx(bins::SVector{3,Float64}, ai, nbin::Int32)
     bi = to_grid_index(bins[1], nbin)
-    bj = to_grid_index(bins[2], nbin)
+    # beta: half-bin centres in the angijk tables -> floor, clamped (b2 == nbin at beta = pi)
+    bj = clamp(unsafe_trunc(Int32, floor(bins[2])), Int32(0), nbin - Int32(1))
     bk = to_grid_index(bins[3], nbin)
     idx = (Int64(bi) * nbin + bj) * nbin + bk
     return Int32(@inbounds ai[idx + 1])

@@ -175,9 +175,16 @@ static inline int to_grid_index(double x, int grid_size) {
     return (idx < 0) ? idx + grid_size : (idx == grid_size) ? 0 : idx;
 }
 
+// beta: the angijk tables use half-bin centres (bin j covers b2 in [j, j+1)), so floor, clamped to
+// grid_size-1 so that b2 == grid_size (beta = pi) stays in the last bin instead of wrapping to 0.
+static inline int to_beta_index(double x, int grid_size) {
+    int idx = (int)floor(x);
+    return (idx < 0) ? 0 : (idx >= grid_size) ? grid_size - 1 : idx;
+}
+
 static inline int orientation_to_index(const double orient[3], int nbin) {
     int i = to_grid_index(orient[0], nbin);
-    int j = to_grid_index(orient[1], nbin);
+    int j = to_beta_index(orient[1], nbin);
     int k = to_grid_index(orient[2], nbin);
     return i * nbin * nbin + j * nbin + k;
 }
