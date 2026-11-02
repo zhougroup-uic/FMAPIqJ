@@ -177,7 +177,15 @@ function main_fmapdd(argv::Vector{String})
     center(atoms, c) = [Atom(a.info, a.x - c[1], a.y - c[2], a.z - c[3], a.q, a.r, a.Asq, a.Bsq) for a in atoms]
     rec = center(read_vdw(poses.rec), poses.rcen)
     lig = center(read_vdw(poses.lig), poses.lcen)
-    res = pair_energies(rec, lig, poses, ps; atm)
+    gpu = !(get(ENV, "FMAPB2_GPU", "0") in ("", "0"))
+    gpu && Base.include(FmapGen, joinpath(@__DIR__, "..", "gpu", "gpu.jl"))      # CUDA device
+    t = @elapsed res = if gpu
+        f = Base.invokelatest(getglobal, FmapGen, :pair_energies_gpu)
+        Base.invokelatest(f, rec, lig, poses, ps; atm)
+    else
+        pair_energies(rec, lig, poses, ps; atm)
+    end
+    @printf(stderr, "fmapdd: %d poses, %s, %.1f s\n", length(poses.ang), gpu ? "GPU" : "$(Threads.nthreads()) CPU threads", t)
     write_pose_header(stdout, poses.l, poses.dx, poses.rec, poses.lig)
     write_pair_poses(stdout, poses, res)
     if atm

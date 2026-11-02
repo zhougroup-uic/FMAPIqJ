@@ -279,3 +279,96 @@ function select_poses(io::IO, ctx::GPUCtx, ang, ecut::Real)
     end
     return length(order)
 end
+
+# ---- pair energies of listed poses (fmapdd / fmapdd.atm, cpu/pair.jl) ----
+
+# One thread per (pose, atom): side 1 = ligand atom looping over the receptor, side 2 = receptor atom looping over the
+# ligand (so the per-atom sums need no atomics and are reproducible). out[:, atom, pose] = (vol, ele, vdw), unscaled.
+function pair_kernel!(out, side::Int, rec, lig, Rm, offs, p0::Int, np::Int, kap::Float64, rEup2::Float64, rup2::Float64,
+                      rlow2::Float64, L::Float64)
+    t = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    nr = length(rec.x); nl = length(lig.x)
+    na = side == 1 ? nl : nr
+    t > na * np && return
+    a = (t - 1) % na + 1
+    p = (t - 1) ÷ na + 1
+    gp = p0 + p
+    hL = 0.5 * L
+    cut2 = max(rEup2, rup2)
+    r11 = Rm[1, gp]; r12 = Rm[2, gp]; r13 = Rm[3, gp]; r21 = Rm[4, gp]; r22 = Rm[5, gp]; r23 = Rm[6, gp]
+    r31 = Rm[7, gp]; r32 = Rm[8, gp]; r33 = Rm[9, gp]
+    o1 = offs[1, gp]; o2 = offs[2, gp]; o3 = offs[3, gp]
+    sv = 0.0; se = 0.0; sw = 0.0
+    n = side == 1 ? nr : nl
+    for b in 1:n
+        i = side == 1 ? b : a
+        j = side == 1 ? a : b
+        px = lig.x[j]; py = lig.y[j]; pz = lig.z[j]
+        lx = r11 * px + r12 * py + r13 * pz + o1
+        ly = r21 * px + r22 * py + r23 * pz + o2
+        lz = r31 * px + r32 * py + r33 * pz + o3
+        dx = rec.x[i] - lx; dx = dx > hL ? dx - L : (dx < -hL ? dx + L : dx)
+        dy = rec.y[i] - ly; dy = dy > hL ? dy - L : (dy < -hL ? dy + L : dy)
+        dz = rec.z[i] - lz; dz = dz > hL ? dz - L : (dz < -hL ? dz + L : dz)
+        d2 = dx * dx + dy * dy + dz * dz
+        d2 > cut2 && continue
+        rs = rec.r[i] + lig.r[j]
+        v = d2 > rs * rs ? 0.0 : 1.0
+        e = 0.0
+        if d2 <= rEup2
+            dd = sqrt(d2 > rlow2 ? d2 : rlow2)
+            e = rec.q[i] * lig.q[j] * exp(-1.0 * dd * kap) / dd
+        end
+        w = 0.0
+        d2m = d2 > rlow2 ? d2 : rlow2
+        if d2m <= rup2
+            d6 = d2m * d2m * d2m
+            w = rec.Asq[i] * lig.Asq[j] / (d6 * d6) - rec.Bsq[i] * lig.Bsq[j] / d6
+        end
+        sv += v; se += e; sw += w
+    end
+    out[1, a, p] = sv; out[2, a, p] = se; out[3, a, p] = sw
+    return
+end
+
+"GPU version of `pair_energies` (same result up to the order of the sums)."
+function pair_energies_gpu(rec::Vector{Atom}, lig::Vector{Atom}, poses::Poses, ps::PairSys; atm::Bool = false, chunk::Int = 256)
+    nr = length(rec); nl = length(lig); np = length(poses.ang)
+    nt(d::DevAtoms) = (x = d.x, y = d.y, z = d.z, q = d.q, r = d.r, Asq = d.Asq, Bsq = d.Bsq)      # adaptable to the device
+    dr = nt(DevAtoms(rec)); dl = nt(DevAtoms(lig))
+    Rh = zeros(9, np); Oh = zeros(3, np)
+    for p in 1:np
+        a = poses.ang[p]; R = euler_to_rotmat(a[1], a[2], a[3]); k = poses.ijk[p]
+        Rh[:, p] = [R[1][1], R[1][2], R[1][3], R[2][1], R[2][2], R[2][3], R[3][1], R[3][2], R[3][3]]
+        Oh[:, p] = [wrap_ijk(k[c], poses.l) * poses.dx for c in 1:3]
+    end
+    Rm = CuArray(Rh); offs = CuArray(Oh)
+    ern = zeros(4, np)
+    accr = zeros(3, nr); accl = zeros(3, nl)
+    out1 = CUDA.zeros(Float64, 3, nl, chunk)
+    out2 = atm ? CUDA.zeros(Float64, 3, nr, chunk) : nothing
+    thr = 128
+    for p0 in 0:chunk:np-1
+        nc = min(chunk, np - p0)
+        @cuda threads = thr blocks = cld(nl * nc, thr) pair_kernel!(out1, 1, dr, dl, Rm, offs, p0, nc, ps.kap, ps.rEup2, ps.rup2, ps.rlow2, ps.L)
+        s = Array(sum(view(out1, :, :, 1:nc); dims = 2))                  # 3 x 1 x nc
+        for c in 1:nc
+            p = p0 + c
+            ern[2, p] = s[1, 1, c]; ern[3, p] = s[2, 1, c] * ps.es; ern[4, p] = s[3, 1, c] * ps.vscl
+            ern[1, p] = ern[3, p] + ern[4, p]
+        end
+        if atm
+            accl .+= Array(dropdims(sum(view(out1, :, :, 1:nc); dims = 3); dims = 3))
+            @cuda threads = thr blocks = cld(nr * nc, thr) pair_kernel!(out2, 2, dr, dl, Rm, offs, p0, nc, ps.kap, ps.rEup2, ps.rup2, ps.rlow2, ps.L)
+            accr .+= Array(dropdims(sum(view(out2, :, :, 1:nc); dims = 3); dims = 3))
+        end
+    end
+    atm || return PairResult(ern, nothing, nothing)
+    function fin(s)
+        out = zeros(4, size(s, 2))
+        out[1, :] = s[1, :]; out[2, :] = s[2, :] .* ps.es; out[3, :] = s[3, :] .* ps.vscl
+        out[4, :] = out[2, :] .+ out[3, :]
+        return out
+    end
+    return PairResult(ern, fin(accr), fin(accl))
+end
