@@ -107,5 +107,4 @@ docs/        notes on the pipeline options
   weights reproduced the second moments with an error of up to 0.34; the new ones satisfy all of them to 1e-15. Same grid
   indices, only the weights changed, so all energy maps change slightly: cenA B2 (0.15 M, 25 °C, 72 orientations) -1.559 -> -1.560;
   the `expected/` I(q) files were regenerated (mean/P0 differs from the old ones by 0.1% on average, by up to 3.4% at single points for 64 runs and 7% for 3 runs).
-  `examples/n200_test/n200_test.cached.ipynb` still shows the results of the old lattice until it is rerun on Colab.
 - License: GPL-3.0 (see `LICENSE`).
