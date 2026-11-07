@@ -102,4 +102,10 @@ docs/        notes on the pipeline options
   centres); earlier versions used `round(b2)` with wrap, which sent beta near pi to beta near 0. The result
   shifts I(q) by at most ~2% (within the run-to-run error); the `expected/` files were regenerated with this
   fix (GPU, 64 runs) and differ from the old ones by that amount. Same change in `reference/maeppi/fmap_energy.c`.
+- `data/lattice.txt` (weights of the 10-point second-order charge spreading) is regenerated from the corrected
+  `data/genlattice.py` (`python3 genlattice.py > lattice.txt` reproduces it exactly): the old table missed the y*z moment condition (the generator used `dx*dz` twice), so its
+  weights reproduced the second moments with an error of up to 0.34; the new ones satisfy all of them to 1e-15. Same grid
+  indices, only the weights changed, so all energy maps change slightly: cenA B2 (0.15 M, 25 °C, 72 orientations) -1.559 -> -1.560;
+  the `expected/` I(q) files were regenerated (mean/P0 differs from the old ones by 0.1% on average, by up to 3.4% at single points for 64 runs and 7% for 3 runs).
+  `examples/n200_test/n200_test.cached.ipynb` still shows the results of the old lattice until it is rerun on Colab.
 - License: GPL-3.0 (see `LICENSE`).
