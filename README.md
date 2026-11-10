@@ -86,7 +86,7 @@ bin/         command-line tools: fmapiq fmappre fmap fmapstat fmap_pack_zlib sim
              sim2iqpre sim2iq sim2iq_gpu sim2iq_gpu_batch
 src/grid/    energy maps (cpu/, gpu/)        src/sim/     NVT Monte Carlo (cpu/, gpu/)
 src/sim2iq/  scattering (cpu/, gpu/)         src/fmapiq/  pipeline driver
-data/        rotation tables, lattice, mean volumes
+data/        rotation tables, mean volumes
 examples/    N200 test and N800 production examples, input PQR
 test/        regression test against the C reference (CPU runtests.jl, GPU test_sim2iq_gpu.sh)
 tools/       check_result.jl, traj2pdb.py (configuration → PDB, needs numpy)
@@ -102,9 +102,14 @@ docs/        notes on the pipeline options
   centres); earlier versions used `round(b2)` with wrap, which sent beta near pi to beta near 0. The result
   shifts I(q) by at most ~2% (within the run-to-run error); the `expected/` files were regenerated with this
   fix (GPU, 64 runs) and differ from the old ones by that amount. Same change in `reference/maeppi/fmap_energy.c`.
-- `data/lattice.txt` (weights of the 10-point second-order charge spreading) is regenerated from the corrected
-  `data/genlattice.py` (`python3 genlattice.py > lattice.txt` reproduces it exactly): the old table missed the y*z moment condition (the generator used `dx*dz` twice), so its
-  weights reproduced the second moments with an error of up to 0.34; the new ones satisfy all of them to 1e-15. Same grid
-  indices, only the weights changed, so all energy maps change slightly: cenA B2 (0.15 M, 25 °C, 72 orientations) -1.559 -> -1.560;
-  the `expected/` I(q) files were regenerated (mean/P0 differs from the old ones by 0.1% on average, by up to 3.4% at single points for 64 runs and 7% for 3 runs).
+- The 10-point second-order charge spreading (Qin & Zhou, JCTC 2014, 10, 2824) is computed from its closed form, per atom
+  (`map_L2nd!` in `src/grid/cpu/mapping.jl`, the CUDA kernel in `src/grid/gpu/gpu.jl`, `Map2GrdL2nd` in `reference/fmapb2/map.c`); the
+  table `data/lattice.txt` (1000 sub-grid positions, weights from a least-squares solve) is removed. The formulas are the same ones the
+  table sampled, so the weights now use the exact position of the atom inside its cell instead of its 0.1-cell, and they satisfy
+  the moment conditions exactly (the table of earlier versions also missed the y*z condition: error up to 0.34). Energy maps
+  therefore change slightly: cenA B2 (0.15 M, 25 °C, 72 orientations, CPU and GPU) -1.560 -> -1.558 (error bar 0.08); the `expected/` I(q) files
+  were regenerated (mean/P0 differs from the previous ones by 0.1% on average; the largest single-point differences, 6-7% at q < 0.025, are
+  within the statistical noise of the runs: rms difference / combined SEM about 1.1-1.3 for 64 runs). Grid generation time is unchanged
+  (the spreading itself is 3x faster on the CPU and 30% on the GPU, but it is under 0.1% of one orientation). The generator and the closed form
+  are in the FMAPlattice repository.
 - License: GPL-3.0 (see `LICENSE`).

@@ -30,7 +30,7 @@ function tern_bytes_from_env()
     return tb
 end
 
-"Directory with lattice.txt and the rotation tables (sspNF<nrot>/)."
+"Directory with the rotation tables (sspNF<nrot>/)."
 function data_dir()
     d = get(ENV, "FMAPB2_DATA_PATH", "")
     isempty(d) || return d

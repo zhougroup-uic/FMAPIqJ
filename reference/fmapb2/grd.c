@@ -132,9 +132,6 @@ void softgrd(int nCrd, ATOM Crds[], int nPro, ATOM Pros[], int l, double dx, SOL
         return;
     }
     
-    static int init_lattice=0;
-    if (init_lattice==0) init_lattice_data();
-
     SetZero(l,lcEle);
     SetZero(l,lcVdw);
     SetZero(l,combined);

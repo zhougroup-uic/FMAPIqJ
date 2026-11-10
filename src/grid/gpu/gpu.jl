@@ -72,7 +72,7 @@ function map_R!(grd::CuArray{Float64,3}, at::DevAtoms, coeffs, rups, rlow, dx, s
     return grd
 end
 
-# ---- trilinear mapping and 10-point lattice spreading: one thread per atom ----
+# ---- trilinear mapping and 10-point second-order spreading: one thread per atom ----
 
 function mapL_kernel!(grd, xs, ys, zs, coeffs, l::Int32)
     a = (blockIdx().x - 1) * blockDim().x + threadIdx().x
@@ -95,20 +95,36 @@ function mapL_kernel!(grd, xs, ys, zs, coeffs, l::Int32)
     return
 end
 
-function mapL2nd_kernel!(grd, xs, ys, zs, coeffs, lind, lwght, l::Int32)
+# Closed-form 10-point spreading, see map_L2nd! in grid/cpu/mapping.jl
+function mapL2nd_kernel!(grd, xs, ys, zs, coeffs, l::Int32)
     a = (blockIdx().x - 1) * blockDim().x + threadIdx().x
     a > length(xs) && return
     coeff = coeffs[a]
     lx = floor(xs[a]); ly = floor(ys[a]); lz = floor(zs[a])
     fx = xs[a] - lx; fy = ys[a] - ly; fz = zs[a] - lz
-    pos = unsafe_trunc(Int32, fx * 10.0) * Int32(100) + unsafe_trunc(Int32, fy * 10.0) * Int32(10) + unsafe_trunc(Int32, fz * 10.0)
-    ix = unsafe_trunc(Int32, lx); iy = unsafe_trunc(Int32, ly); iz = unsafe_trunc(Int32, lz)
-    for q in Int32(1):Int32(10)
-        n = lind[q, pos+1]
-        i0 = n ÷ Int32(16); j0 = (n - i0 * Int32(16)) ÷ Int32(4); k0 = n - i0 * Int32(16) - j0 * Int32(4)
-        px = mod(ix - Int32(1) + i0, l); py = mod(iy - Int32(1) + j0, l); pz = mod(iz - Int32(1) + k0, l)
-        CUDA.@atomic grd[pz+1, py+1, px+1] += coeff * lwght[q, pos+1]
-    end
+    nx = fx < 0.5; ny = fy < 0.5; nz = fz < 0.5
+    u = nx ? fx : 1.0 - fx; v = ny ? fy : 1.0 - fy; w = nz ? fz : 1.0 - fz
+    # wrap the nearest grid point once per axis; its two neighbours follow by a compare (no further mod)
+    x0 = mod(unsafe_trunc(Int32, lx) + (nx ? Int32(0) : Int32(1)), l)
+    y0 = mod(unsafe_trunc(Int32, ly) + (ny ? Int32(0) : Int32(1)), l)
+    z0 = mod(unsafe_trunc(Int32, lz) + (nz ? Int32(0) : Int32(1)), l)
+    xu = x0 + Int32(1) == l ? Int32(0) : x0 + Int32(1); xd = x0 == Int32(0) ? l - Int32(1) : x0 - Int32(1)
+    yu = y0 + Int32(1) == l ? Int32(0) : y0 + Int32(1); yd = y0 == Int32(0) ? l - Int32(1) : y0 - Int32(1)
+    zu = z0 + Int32(1) == l ? Int32(0) : z0 + Int32(1); zd = z0 == Int32(0) ? l - Int32(1) : z0 - Int32(1)
+    xn = nx ? xu : xd; xf = nx ? xd : xu      # n: toward the charge, f: away from it
+    yn = ny ? yu : yd; yf = ny ? yd : yu
+    zn = nz ? zu : zd; zf = nz ? zd : zu
+    uv = u * v; uw = u * w; vw = v * w
+    CUDA.@atomic grd[z0+1, y0+1, x0+1] += coeff * (1.0 - u * u - v * v - w * w + uv + uw + vw)
+    CUDA.@atomic grd[z0+1, y0+1, xn+1] += coeff * (u * (u + 1.0) / 2 - uv - uw)
+    CUDA.@atomic grd[z0+1, y0+1, xf+1] += coeff * (u * (u - 1.0) / 2)
+    CUDA.@atomic grd[z0+1, yn+1, x0+1] += coeff * (v * (v + 1.0) / 2 - uv - vw)
+    CUDA.@atomic grd[z0+1, yf+1, x0+1] += coeff * (v * (v - 1.0) / 2)
+    CUDA.@atomic grd[zn+1, y0+1, x0+1] += coeff * (w * (w + 1.0) / 2 - uw - vw)
+    CUDA.@atomic grd[zf+1, y0+1, x0+1] += coeff * (w * (w - 1.0) / 2)
+    CUDA.@atomic grd[zn+1, yn+1, x0+1] += coeff * vw
+    CUDA.@atomic grd[zn+1, y0+1, xn+1] += coeff * uw
+    CUDA.@atomic grd[z0+1, yn+1, xn+1] += coeff * uv
     return
 end
 
@@ -118,9 +134,9 @@ function map_L!(grd, at::DevAtoms, coeffs)
     return grd
 end
 
-function map_L2nd!(grd, at::DevAtoms, coeffs, lind, lwght)
+function map_L2nd!(grd, at::DevAtoms, coeffs)
     at.n == 0 && return grd
-    @cuda threads = 128 blocks = cld(at.n, 128) mapL2nd_kernel!(grd, at.x, at.y, at.z, coeffs, lind, lwght, Int32(size(grd, 1)))
+    @cuda threads = 128 blocks = cld(at.n, 128) mapL2nd_kernel!(grd, at.x, at.y, at.z, coeffs, Int32(size(grd, 1)))
     return grd
 end
 
@@ -129,8 +145,6 @@ end
 mutable struct GPUCtx
     l::Int
     tern::Int
-    lind::CuMatrix{Int32}
-    lwght::CuMatrix{Float64}
     plan_f::Any
     plan_b::Any
     crowd::Dict{Symbol,CuArray{ComplexF64,3}}
@@ -144,10 +158,9 @@ mutable struct GPUCtx
 end
 
 function GPUCtx(l::Int; tern::Int = tern_bytes_from_env())
-    lat = load_lattice()
     working = CUDA.zeros(Float64, l, l, l)
     ft = CuArray{ComplexF64}(undef, l ÷ 2 + 1, l, l)
-    return GPUCtx(l, tern, CuArray(lat.ind), CuArray(lat.wght), plan_rfft(working), plan_irfft(ft, l),
+    return GPUCtx(l, tern, plan_rfft(working), plan_irfft(ft, l),
                   Dict{Symbol,CuArray{ComplexF64,3}}(), working, CUDA.zeros(Float64, l, l, l),
                   CUDA.zeros(Float64, l, l, l), CUDA.zeros(Float64, l, l, l), CUDA.zeros(Bool, l, l, l), ft, nothing)
 end
@@ -197,7 +210,7 @@ function probe_grid!(ctx::GPUCtx, kind::Symbol, at::DevAtoms, dx::Float64)
     if kind === :vol
         map_R!(g, at, CUDA.ones(Float64, at.n), at.r, 0.0, dx, at.r .* at.r, rdf_vol; maxrup = maximum(at.r))
     elseif kind === :ele
-        map_L2nd!(g, at, at.q, ctx.lind, ctx.lwght)
+        map_L2nd!(g, at, at.q)
     elseif kind === :vdw
         map_L!(g, at, at.Bsq)
     else

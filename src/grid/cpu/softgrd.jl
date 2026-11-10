@@ -7,7 +7,6 @@
 "Per-run state: FFT plans and the cached crowder transforms (the crowder atoms never change)."
 mutable struct SoftCtx
     l::Int
-    lat::Lattice
     tern::Int
     plan_f::Any
     plan_b::Any
@@ -20,13 +19,13 @@ mutable struct SoftCtx
     ft::Array{ComplexF64,3}
 end
 
-function SoftCtx(l::Int; tern::Int = tern_bytes_from_env(), lat::Lattice = load_lattice())
+function SoftCtx(l::Int; tern::Int = tern_bytes_from_env())
     FFTW.set_num_threads(Threads.nthreads())
     working = zeros(l, l, l)
     ft = Array{ComplexF64}(undef, l ÷ 2 + 1, l, l)
     plan_f = plan_rfft(working; flags = FFTW.ESTIMATE)
     plan_b = plan_irfft(ft, l; flags = FFTW.ESTIMATE)
-    return SoftCtx(l, lat, tern, plan_f, plan_b, Dict{Symbol,Array{ComplexF64,3}}(),
+    return SoftCtx(l, tern, plan_f, plan_b, Dict{Symbol,Array{ComplexF64,3}}(),
                    working, zeros(l, l, l), zeros(l, l, l), zeros(l, l, l), falses(l, l, l), ft)
 end
 
@@ -88,12 +87,12 @@ function crowd_grid!(g::Array{Float64,3}, kind::Symbol, atoms::Vector{Atom}, dx:
     end
 end
 
-function probe_grid!(g::Array{Float64,3}, kind::Symbol, atoms::Vector{Atom}, dx::Float64, sol::Solv, lat::Lattice)
+function probe_grid!(g::Array{Float64,3}, kind::Symbol, atoms::Vector{Atom}, dx::Float64, sol::Solv)
     fill!(g, 0.0)
     if kind === :vol
         map_R!(g, atoms, ones(length(atoms)), Float64[a.r for a in atoms], 0.0, dx, Float64[a.r * a.r for a in atoms], rdf_vol)
     elseif kind === :ele
-        map_L2nd!(g, atoms, atom_coeffs(a -> a.q, atoms), lat)
+        map_L2nd!(g, atoms, atom_coeffs(a -> a.q, atoms))
     elseif kind === :vdw
         map_L!(g, atoms, atom_coeffs(a -> a.Bsq, atoms))
     else
@@ -108,7 +107,7 @@ function correlate!(ctx::SoftCtx, kind::Symbol, crds::Vector{Atom}, pros::Vector
         crowd_grid!(g, kind, crds, dx, sol)
         ctx.crowd[kind] = ctx.plan_f * g
     end
-    probe_grid!(g, kind, pros, dx, sol, ctx.lat)
+    probe_grid!(g, kind, pros, dx, sol)
     mul!(ctx.ft, ctx.plan_f, g)
     FC = ctx.crowd[kind]
     ft = ctx.ft

@@ -21,25 +21,6 @@ end
 @inline pbc(x::Int, mx::Int) = mod(x, mx)
 @inline signI(x::Float64) = x < 0.0 ? -1 : 1
 
-# ---- lattice weights for the 2nd-order charge spreading (data/lattice.txt) ----
-
-struct Lattice
-    ind::Matrix{Int32}       # (10, 1000)
-    wght::Matrix{Float64}    # (10, 1000)
-end
-
-function load_lattice(path::AbstractString = joinpath(data_dir(), "lattice.txt"))
-    isfile(path) || error("Cannot find lattice.txt ($path); set FMAPB2_DATA_PATH")
-    ind = zeros(Int32, 10, 1000); wght = zeros(Float64, 10, 1000)
-    toks = split(read(path, String))
-    length(toks) >= 20000 || @warn "lattice.txt has fewer than 1000 entries" n = length(toks) ÷ 20
-    for p in 1:min(1000, length(toks) ÷ 20), q in 1:10
-        ind[q, p] = parse(Int32, toks[20(p-1)+2q-1])
-        wght[q, p] = parse(Float64, toks[20(p-1)+2q])
-    end
-    return Lattice(ind, wght)
-end
-
 @inline scl_of(s::Float64, a::Int) = s
 @inline scl_of(s::Vector{Float64}, a::Int) = @inbounds s[a]
 
@@ -117,21 +98,45 @@ function map_L!(grd::Array{Float64,3}, atoms::Vector{Atom}, coeffs::Vector{Float
     return grd
 end
 
-# ---- 10-point lattice spreading (Map2GrdL2nd) ----
+# ---- 10-point second-order spreading (Map2GrdL2nd), closed form ----
+#
+# Qin & Zhou, JCTC 2014, 10, 2824 (Fig. 3, Eq. 12). The 10 weights reproduce the charge, its first and its second moments exactly,
+# so they are polynomials of the offset of the charge from its nearest grid point c. Per axis let s = +1 if the charge lies on the
+# +side of c (-1 otherwise) and u, v, w in [0, 1/2] its distances to c along x, y, z. Weights (y and z by permuting u, v, w):
+#   c                       1 - u^2 - v^2 - w^2 + uv + uw + vw
+#   c - s_x ex   (far)      u(u-1)/2
+#   c + s_x ex   (near)     u(u+1)/2 - u(v+w)
+#   c + s_y ey + s_z ez     vw          (and the two other face diagonals)
+# (this replaces the table data/lattice.txt of 1000 sub-grid positions, which was a 0.1-grid sampling of the same formulas)
 
-function map_L2nd!(grd::Array{Float64,3}, atoms::Vector{Atom}, coeffs::Vector{Float64}, lat::Lattice)
+"Nearest grid point offset (0 or 1 from floor), direction toward the charge (+1/-1) and the distance u of a fractional coordinate."
+@inline function l2nd_axis(f::Float64)
+    near = f < 0.5
+    return near ? 0 : 1, near ? 1 : -1, near ? f : 1.0 - f
+end
+
+"Periodic neighbours of a grid index i0 already in 0:l-1: (toward the charge, away from it). A compare, not a mod."
+@inline function l2nd_nbrs(i0::Int, s::Int, l::Int)
+    up = i0 + 1 == l ? 0 : i0 + 1
+    dn = i0 == 0 ? l - 1 : i0 - 1
+    return s > 0 ? (up, dn) : (dn, up)
+end
+
+function map_L2nd!(grd::Array{Float64,3}, atoms::Vector{Atom}, coeffs::Vector{Float64})
     l = size(grd, 1)
     @inbounds for a in eachindex(atoms)
         at = atoms[a]; coeff = coeffs[a]
         lx = floor(at.x); ly = floor(at.y); lz = floor(at.z)
-        fx = at.x - lx; fy = at.y - ly; fz = at.z - lz
-        pos = unsafe_trunc(Int, fx * 10.0) * 100 + unsafe_trunc(Int, fy * 10.0) * 10 + unsafe_trunc(Int, fz * 10.0)
-        for q in 1:10
-            n = Int(lat.ind[q, pos+1])
-            i0 = n ÷ 16; j0 = (n - i0 * 16) ÷ 4; k0 = n - i0 * 16 - j0 * 4
-            px = pbc(Int(lx) - 1 + i0, l); py = pbc(Int(ly) - 1 + j0, l); pz = pbc(Int(lz) - 1 + k0, l)
-            grd[pz+1, py+1, px+1] += coeff * lat.wght[q, pos+1]
-        end
+        cx, sx, u = l2nd_axis(at.x - lx); cy, sy, v = l2nd_axis(at.y - ly); cz, sz, w = l2nd_axis(at.z - lz)
+        # wrap the nearest grid point once per axis; its two neighbours follow by a compare
+        x0 = pbc(Int(lx) + cx, l); y0 = pbc(Int(ly) + cy, l); z0 = pbc(Int(lz) + cz, l)
+        xn, xf = l2nd_nbrs(x0, sx, l); yn, yf = l2nd_nbrs(y0, sy, l); zn, zf = l2nd_nbrs(z0, sz, l)
+        uv = u * v; uw = u * w; vw = v * w
+        grd[z0+1, y0+1, x0+1] += coeff * (1.0 - u * u - v * v - w * w + uv + uw + vw)
+        grd[z0+1, y0+1, xn+1] += coeff * (u * (u + 1.0) / 2 - uv - uw); grd[z0+1, y0+1, xf+1] += coeff * (u * (u - 1.0) / 2)
+        grd[z0+1, yn+1, x0+1] += coeff * (v * (v + 1.0) / 2 - uv - vw); grd[z0+1, yf+1, x0+1] += coeff * (v * (v - 1.0) / 2)
+        grd[zn+1, y0+1, x0+1] += coeff * (w * (w + 1.0) / 2 - uw - vw); grd[zf+1, y0+1, x0+1] += coeff * (w * (w - 1.0) / 2)
+        grd[zn+1, yn+1, x0+1] += coeff * vw; grd[zn+1, y0+1, xn+1] += coeff * uw; grd[z0+1, yn+1, xn+1] += coeff * uv
     end
     return grd
 end

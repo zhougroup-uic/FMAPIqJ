@@ -60,7 +60,6 @@ void r6GrdR(int l, fftw_real *grd, int nAtom, ATOM *atoms, double sys[4]);
 void r6GrdL(int l, fftw_real *grd, int nAtom, ATOM *atoms, double sys[4]);
 void r12GrdR(int l, fftw_real *grd, int nAtom, ATOM *atoms, double sys[4]);
 void r12GrdL(int l, fftw_real *grd, int nAtom, ATOM *atoms, double sys[4]);
-int init_lattice_data();
 
 // Score functions
 void SetBool(int l, bool vol[l][l][l], bool label);
