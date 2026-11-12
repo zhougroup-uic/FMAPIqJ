@@ -1,7 +1,9 @@
 # grid.jl - FMAP grid files (fmap_zlib.c / cpu/fmap_energy.c).
 #
-#   rot.zlib: [16 B header: u32 magic 0x524F5446, u32, i32 nrot, i32 nbin][u64 csz][zlib(blob)]
-#             blob = angle_indices[nbin^3 i16] angle_mapping[nrot^2 i16] euler[nrot*3 f64] rotm[nrot*9 f64]
+#   rot.zlib: [16 B header: u32 magic 0x524F5446, u32 version, i32 nrot, i32 nbin][u64 csz][zlib(blob)]
+#             version 1: blob = angle_indices[nbin^3 i16] angle_mapping[nrot^2 i16] euler[nrot*3 f64] rotm[nrot*9 f64]
+#             version 2: the same without angle_mapping (built from the Euler angles at load time, see ../rotsys.jl)
+#             A file that does not start with the magic is read as a rot.eul (Euler angles only).
 #   ve.zlib:  [24 B header: u32 magic 0x46454D41, u32, i32 nrot, i32 blen, f64 spacing][u64 csz][zlib(blob)]
 #             blob = energy[nrot*blen^3 * TERN_BYTES i8]
 #   *.raw:    the same header followed directly by the inflated blob (no csz): what the CPU
@@ -28,13 +30,15 @@ is_zlib(path) = occursin(".zlib", path)
 
 # ---- headers ----
 
-"Rotation-table header of a rot.zlib / rot.raw: (nrot, nbin). Errors on a bad file."
+"Rotation-table header of a rot.zlib / rot.raw / rot.eul: (nrot, nbin). Errors on a bad file."
 function peek_rot_header(path::AbstractString)
-    hdr = open(io -> read(io, ROT_HDR_SIZE), path, "r")
-    length(hdr) == ROT_HDR_SIZE && rd_u32(hdr, 0) == ROT_MAGIC || error("FMAP: bad rot header in $path")
-    nrot = Int(rd_i32(hdr, 8)); nbin = Int(rd_i32(hdr, 12))
-    fmap_geometry_ok(nrot, nbin, 1) || error("FMAP: implausible nrot=$nrot nbin=$nbin in $path")
-    return nrot, nbin
+    if !is_rot_zlib_file(path)                         # rot.eul: one sample per line, nbin from ROT_NBIN
+        nrot = count(l -> !isempty(strip(l)), eachline(path))
+        nbin = parse(Int, get(ENV, "ROT_NBIN", "120"))
+        fmap_geometry_ok(nrot, nbin, 1) || error("FMAP: implausible nrot=$nrot nbin=$nbin in $path")
+        return nrot, nbin
+    end
+    return peek_rot_header3(path)[1:2]
 end
 
 "Energy-grid header of a ve.zlib / ve.raw: (nrot, blen, spacing, header bytes)."
@@ -49,20 +53,32 @@ end
 
 # ---- rotation tables (always read into memory) ----
 
-struct RotTables
-    nrot::Int
-    nbin::Int
-    aidx::Vector{Int16}    # angle_indices [nbin^3]
-    amap::Vector{Int16}    # angle_mapping [nrot^2]
-    rotm::Vector{Float64}  # rotation matrices [nrot*9]
+# RotTables (aidx, amap, rotm) and the pair-table modes are in ../rotsys.jl.
+
+"Rotation-table header of a rot.zlib / rot.raw: (nrot, nbin, version). Errors on a bad file."
+function peek_rot_header3(path::AbstractString)
+    hdr = open(io -> read(io, ROT_HDR_SIZE), path, "r")
+    length(hdr) == ROT_HDR_SIZE && rd_u32(hdr, 0) == ROT_MAGIC || error("FMAP: bad rot header in $path")
+    nrot = Int(rd_i32(hdr, 8)); nbin = Int(rd_i32(hdr, 12))
+    fmap_geometry_ok(nrot, nbin, 1) || error("FMAP: implausible nrot=$nrot nbin=$nbin in $path")
+    return nrot, nbin, Int(rd_u32(hdr, 4))
 end
 
-function read_rot_tables(path::AbstractString)
-    nrot, nbin = peek_rot_header(path)
-    aidx = Vector{Int16}(undef, nbin^3)
-    amap = Vector{Int16}(undef, nrot^2)
-    skip_n = nrot * 3 * 8
-    rotm = Vector{Float64}(undef, nrot * 9)
+# the contexts of a mixture share one rotation system: build it once per file
+const ROT_TABLE_CACHE = Dict{Tuple{String,Int},RotTables}()
+
+function read_rot_tables(path::AbstractString; mode::Int = amap_mode_from_env())
+    key = (realpath(path), mode)
+    haskey(ROT_TABLE_CACHE, key) && return ROT_TABLE_CACHE[key]
+    return ROT_TABLE_CACHE[key] = read_rot_tables_file(path, mode)
+end
+
+function read_rot_tables_file(path::AbstractString, mode::Int)
+    is_rot_zlib_file(path) || return rot_tables_from_eul(path; mode)
+    nrot, nbin, version = peek_rot_header3(path)
+    version in (1, 2) || error("FMAP: $path: unknown rot version $version")
+    nbytes = nbin^3 * 2 + (version == 1 ? nrot^2 * 2 : 0) + nrot * 3 * 8 + nrot * 9 * 8
+    blob = Vector{UInt8}(undef, nbytes)
     open(path, "r") do io
         skip(io, ROT_HDR_SIZE)
         if is_zlib(path)
@@ -70,16 +86,16 @@ function read_rot_tables(path::AbstractString)
             filesize(path) >= ROT_HDR_SIZE + 8 + csz || error("FMAP: $path is truncated")
             s = ZlibDecompressorStream(io)
             try
-                read!(s, aidx); read!(s, amap); read!(s, Vector{UInt8}(undef, skip_n)); read!(s, rotm)
+                read!(s, blob)
             catch e
                 e isa EOFError ? error("FMAP: $path inflates to less data than its header needs") : rethrow()
             end
             eof(s) || error("FMAP: $path inflates to more data than its header needs")
         else
-            read!(io, aidx); read!(io, amap); skip(io, skip_n); read!(io, rotm)
+            read!(io, blob)
         end
     end
-    return RotTables(nrot, nbin, aidx, amap, rotm)
+    return rot_tables_from_blob(version, nrot, nbin, blob; mode, what = String(path))
 end
 
 # ---- energy grid streaming (inflate) ----
@@ -175,7 +191,7 @@ struct FmapCtx
     elec_scale::Float64
     vdw_scale::Float64
     aidx::Vector{Int16}
-    amap::Vector{Int16}
+    amap::AMapC
     rotm::Vector{Float64}
     energy::Vector{Int8}   # mmap'd (read-only), nrot*blen^3*tern cells
 end
@@ -219,7 +235,7 @@ end
     d2 = muladd(dz, dz, muladd(dx, dx, dy * dy))
     d2 > c.rcut2 && return 0.0
     @inbounds begin
-        a3 = Int(c.amap[Int(r1) * c.nrot + Int(r2) + 1])
+        a3 = amget(c.amap, Int(r1), Int(r2), c.nrot)
         b = Int(r1) * 9
         R = c.rotm
         rx = muladd(R[b+3], dz, muladd(R[b+1], dx, R[b+2] * dy))

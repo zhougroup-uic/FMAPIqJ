@@ -1,4 +1,4 @@
-# pack.jl - fmap_pack_zlib: ve/tErn.*.mat.gz + rotation tables -> <prefix>.rot.zlib / <prefix>.ve.zlib
+# pack.jl - fmap_pack_zlib: ve/tErn.*.mat.gz -> <prefix>.ve.zlib (the rotation system is the rot.eul of the sample set, no rot.zlib)
 # (tools/fmap_pack_zlib.py; file layout in src/fmap_zlib.c / the simulation's grid loader).
 
 const ROT_MAGIC_PACK = 0x524F5446      # "ROTF"
@@ -27,7 +27,7 @@ function load_pack_config(filename::AbstractString)
     nrot == 0 && (nrot = 72)
     spacing == 0.0 && (spacing = 0.6)
     cand = joinpath(data_dir(), @sprintf("sspNF%05d", nrot))
-    isdir(cand) || error("cannot find rotation tables $cand (nrot=$nrot); only the sets under fmapb2/data/ are supported")
+    isfile(joinpath(cand, "rot.eul")) || error("cannot find $cand/rot.eul (nrot=$nrot); only the sets under data/ are supported")
     return PackConfig(nrot, blen, 120, spacing, cand)
 end
 
@@ -57,36 +57,9 @@ function write_zlb(f, path::AbstractString, header::Vector{UInt8}, raw_bytes::In
     @printf("  wrote %s: %.1f MB -> %.2f MB (%.1fx)\n", path, raw_bytes / 1e6, csz / 1e6, raw_bytes / max(1, csz))
 end
 
-"<prefix>.rot.zlib from the rotation-table blobs (ijk, ij2k, rot, rotm)."
-function write_rot_zlib(cfg::PackConfig, prefix::AbstractString, blobs; level::Integer = 1)
-    hdr = IOBuffer()
-    write(hdr, UInt32(ROT_MAGIC_PACK), UInt32(1), Int32(cfg.nrot), Int32(cfg.nbin))
-    write_zlb(prefix * ".rot.zlib", take!(hdr), sum(length, blobs); level) do s
-        foreach(b -> write(s, b), blobs)
-    end
-end
-
-"Read the four rotation tables of the set `cfg.fpat_rot` (gz files)."
-function read_rot_blobs(cfg::PackConfig)
-    files = (("angijk.dat.gz", cfg.nbin^3, 2), ("angij2k.dat.gz", cfg.nrot^2, 2),
-             ("rot.dat.gz", cfg.nrot * 3, 8), ("rotm.dat.gz", cfg.nrot * 9, 8))
-    return [read_raw(joinpath(cfg.fpat_rot, f), c * e) for (f, c, e) in files]
-end
-
 function pack(config_file::AbstractString, prefix::AbstractString = "fmap"; level::Integer = 1, tern::Integer = tern_bytes_from_env())
     cfg = load_pack_config(config_file)
     @printf("Config: nrot=%d blen=%d nbin=%d spacing=%s lsel=%d\n", cfg.nrot, cfg.blen, cfg.nbin, string(cfg.spacing), cfg.blen)
-
-    files = (("ijk", "angijk.dat.gz", cfg.nbin^3, 2), ("ij2k", "angij2k.dat.gz", cfg.nrot^2, 2),
-             ("rot", "rot.dat.gz", cfg.nrot * 3, 8), ("rotm", "rotm.dat.gz", cfg.nrot * 9, 8))
-    blobs = Vector{UInt8}[]
-    for (name, fname, count, esz) in files
-        path = joinpath(cfg.fpat_rot, fname)
-        d = read_raw(path, count * esz)
-        push!(blobs, d)
-        println("  loaded $name: $path ($(length(d)) bytes)")
-    end
-    write_rot_zlib(cfg, prefix, blobs; level)
 
     slice_bytes = cfg.blen^3 * tern
     hdr = IOBuffer()
@@ -116,13 +89,12 @@ end
 Direct output of the energy maps: `make_grid(i)` (GPU/CPU, main thread) returns the grid of orientation
 `i`; a writer task deflates the grids in order into `<prefix>.ve.zlib` while the next one is computed
 (the zlib stream is sequential, so one thread deflates, the grid computation overlaps it).
-Also writes `<prefix>.rot.zlib`. Same files as fmap + fmap_pack_zlib, without the ve/ directory.
+Same file as fmap + fmap_pack_zlib, without the ve/ directory.
 """
 function write_ve_zlib(make_grid, prefix::AbstractString, parms_file::AbstractString, angles, level::Integer;
                        tern::Integer = tern_bytes_from_env())
     cfg = load_pack_config(parms_file)
     cfg.nrot == length(angles) || error("parms nrot=$(cfg.nrot) but $(length(angles)) orientations in the angle file")
-    write_rot_zlib(cfg, prefix, read_rot_blobs(cfg); level)
     slice_bytes = cfg.blen^3 * tern
     hdr = IOBuffer()
     write(hdr, UInt32(VE_MAGIC_PACK), UInt32(1), Int32(cfg.nrot), Int32(cfg.blen), Float64(cfg.spacing))

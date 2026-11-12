@@ -16,6 +16,7 @@
 # Requires TERN_BYTES to match the grid (1 = summed channel, the pipeline default; 2 = [elec, vdw]).
 using CUDA
 using Printf
+include("../rotsys.jl")           # rotation tables, pair-table modes (AMAP_FOLD), Rotij
 include("kernels.jl")
 include("gemc_box.jl")
 include("fmap_zlib_loader.jl")   # defines load_fmap_zlib/load_fmap_paths -
@@ -89,8 +90,8 @@ function main()
     n_ctx = length(gridset.energy_ctxs)
     d_energy_ctxs = Tuple(gridset.energy_ctxs)
     d_aidx   = CuArray(gridset.angle_indices)
-    d_amap   = CuArray(gridset.angle_mapping)
     d_rotmat = CuArray(gridset.rotation_matrices)
+    d_amap   = amap_device(gridset.angle_mapping, d_aidx, d_rotmat)   # plain / folded / lookup
     # CuArrays are implicitly synchronized by default whenever they're
     # accessed from a different CUDA stream than they were last used on
     # (CUDA.jl's array.jl docstring for enable_synchronization!) - with
@@ -103,7 +104,9 @@ function main()
     # race for the safety synchronization to protect against.
     CUDA.enable_synchronization!.(d_energy_ctxs, false)
     CUDA.enable_synchronization!(d_aidx, false)
-    CUDA.enable_synchronization!(d_amap, false)
+    for a in (d_amap isa DFold ? (d_amap.rrow, d_amap.rg, d_amap.PL, d_amap.data) : d_amap isa AbstractArray ? (d_amap,) : ())
+        CUDA.enable_synchronization!(a, false)
+    end
     CUDA.enable_synchronization!(d_rotmat, false)
     println("Grid loaded: nrot=$(gridset.nrot) nbin=$(gridset.nbin) n_ctx=$n_ctx blens=$(gridset.blens)"); flush(stdout)
     grid_views = [mk_grid_set(gridset, d_energy_ctxs, d_aidx, d_amap, d_rotmat, escls[r], vscls[r]) for r in 1:n_replicas]

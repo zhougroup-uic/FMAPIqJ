@@ -10,6 +10,7 @@ module FmapSim
 using Printf
 
 include("common.jl")
+include("../rotsys.jl")   # rotation tables, pair-table modes (plain / folded / lookup), Rotij
 include("grid.jl")
 include("cpu_gemc.jl")
 include("drivers.jl")

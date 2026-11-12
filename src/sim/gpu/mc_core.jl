@@ -22,13 +22,41 @@ const TERN_SCL = 8.0         # tErn_SCL, fmap_energy.cu:33
 const TERN_BYTES = parse(Int, get(ENV, "TERN_BYTES", "2"))
 TERN_BYTES in (1, 2) || error("TERN_BYTES must be 1 or 2, got $TERN_BYTES")
 
+# angle_mapping on the device (src/sim/rotsys.jl: AMAP_FOLD): a plain Int16 vector, the folded bit-packed table (DFold) or no
+# table (DLook: the index is looked up from the rotation matrices and the bin table; those arrays are the ones already on the device).
+struct DFold{V1,V2,V3,V4}
+    rrow::V1
+    rg::V2
+    PL::V3
+    data::V4
+    n::Int32
+    nc::Int32
+    bits::Int32
+end
+Adapt.@adapt_structure DFold
+@inline amget(a::DFold, i::Int, j::Int, nrot::Int) = foldget(a.rrow, a.rg, a.PL, a.data, Int(a.n), Int(a.nc), Int(a.bits), i, j)
+
+struct DLook{R,I}
+    rotm::R
+    aidx::I
+    nbin::Int32
+end
+Adapt.@adapt_structure DLook
+@inline amget(a::DLook, i::Int, j::Int, nrot::Int) = lookup_index(a.rotm, a.aidx, Int(a.nbin), i, j)
+
+"Device form of a host pair table; `d_aidx`, `d_rotm` are the bin table and rotation matrices already on the device."
+amap_device(a::AMapC, d_aidx, d_rotm) =
+    a.look ? DLook(d_rotm, d_aidx, Int32(a.nbin)) :
+    a.fold ? DFold(CuArray(a.rrow), CuArray(a.rg), CuArray(a.PL), CuArray(a.data), Int32(a.n), Int32(a.nc), Int32(a.bits)) :
+    CuArray(a.dense)
+
 # Shared FMAP grid view - used by both mc_batch.jl (displacement) and
 # transfer_batch.jl (transfer); kept here (not in either) so both files
 # can just `include("mc_core.jl")` without redefining it twice.
-struct GridView{V1<:AbstractVector{Int8}, V2<:AbstractVector{Int16}, V3<:AbstractVector{Float64}}
+struct GridView{V1<:AbstractVector{Int8}, V2<:AbstractVector{Int16}, M, V3<:AbstractVector{Float64}}
     energy_data::V1
     angle_indices::V2
-    angle_mapping::V2
+    angle_mapping::M          # device Int16 vector, or DFold / DLook (AMAP_FOLD=1 / 2)
     rotation_matrices::V3
     nrot::Int32
     blen::Int32
@@ -103,7 +131,7 @@ end
 
     a1 = rot_idx1
     a2 = rot_idx2
-    a3 = Int32(@inbounds angle_mapping[Int64(a1)*nrot + a2 + 1])
+    a3 = Int32(amget(angle_mapping, Int(a1), Int(a2), Int(nrot)))
 
     rotated = apply_rotation(rotation_matrices, Int64(a1) * 9, rel)
 
@@ -177,7 +205,7 @@ end
 # GridSet: real-mixture FMAP contexts, one energy grid per sorted type
 # pair (AA, AB, BB, ...), N = n_types*(n_types+1)/2. Only energy_data
 # differs per pair in the on-disk convention (T0/{AA,AB,BB} each have
-# byte-identical fmap.rot.zlib, only fmap.ve.zlib differs), so the rotation grid
+# the same rot.eul, only fmap.ve.zlib differs), so the rotation grid
 # (angle_indices/angle_mapping/rotation_matrices/nrot/blen/nbin/scl/rcut2)
 # and elec_scale (per-REPLICA temperature scaling, not per-context) are
 # shared across all N contexts and loaded/stored once, exactly mirroring
@@ -190,10 +218,10 @@ end
 # existing GridView/BoxView/mc_batch_kernel!/transfer_batch_kernel! methods
 # are left untouched, and the GridSet path is used only by the
 # mixture-aware kernels (see mix_kernels.jl).
-struct GridSet{V1<:AbstractVector{Int8}, V2<:AbstractVector{Int16}, V3<:AbstractVector{Float64}, N}
+struct GridSet{V1<:AbstractVector{Int8}, V2<:AbstractVector{Int16}, M, V3<:AbstractVector{Float64}, N}
     energy_ctxs::NTuple{N, V1}
     angle_indices::V2
-    angle_mapping::V2
+    angle_mapping::M
     rotation_matrices::V3
     nrot::Int32
     # blen (grid extent) is proportional to molecule size - AA/AB/BB

@@ -29,7 +29,7 @@ end
 
 "fmap subA.vdw parms.txt ang.dat [fnamepat] [subB.vdw]: one gzip'd tErn grid per orientation."
 function main_fmap(argv::Vector{String})
-    # --zlib PREFIX: write PREFIX.ve.zlib and PREFIX.rot.zlib directly (no ve/ directory, no fmap_pack_zlib)
+    # --zlib PREFIX: write PREFIX.ve.zlib directly (no ve/ directory, no fmap_pack_zlib)
     zprefix = nothing
     if (k = findfirst(==("--zlib"), argv)) !== nothing && k < length(argv)
         zprefix = argv[k+1]
@@ -140,7 +140,7 @@ end
 function main_pack(argv::Vector{String})
     if isempty(argv) || argv[1] in ("-h", "--help")
         println("Usage: fmap_pack_zlib <config.txt> [output_prefix] [--level N]")
-        println("  output_prefix  default: 'fmap'  -> fmap.rot.zlib, fmap.ve.zlib")
+        println("  output_prefix  default: 'fmap'  -> fmap.ve.zlib")
         return 0
     end
     prefix = "fmap"; level = 1

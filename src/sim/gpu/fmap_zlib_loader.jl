@@ -3,10 +3,10 @@
 #
 # Format (as written by fmap/fmap_pack_zlib and read by the C engine in reference/maeppi):
 #   rot.zlib: [16-byte header][8-byte csz LE u64][zlib(rot_blob)]
-#     header: u32 magic(0x524F5446) | u32 (unused) | i32 nrot | i32 nbin
-#     rot_blob: angle_indices[nbin^3 i16] + angle_mapping[nrot^2 i16]
-#               + euler_angles[nrot*3 f64] (skipped, unused downstream)
-#               + rotation_matrices[nrot*9 f64]
+#     header: u32 magic(0x524F5446) | u32 version | i32 nrot | i32 nbin
+#     rot_blob: angle_indices[nbin^3 i16] + angle_mapping[nrot^2 i16] (version 1 only; version 2 builds it)
+#               + euler_angles[nrot*3 f64] + rotation_matrices[nrot*9 f64]
+#     A file without the magic is a rot.eul. Pair-table modes (AMAP_FOLD): ../rotsys.jl
 #   ve.zlib:  [24-byte header][8-byte csz LE u64][zlib(ve_blob)]
 #     header: u32 magic(0x46454D41) | u32 (unused) | i32 nrot | i32 blen
 #             | f64 spacing  (scl = 1/spacing, rcut2 = (blen*0.5*spacing)^2)
@@ -29,11 +29,25 @@ end
 @inline rd_i32(h, off::Int) = reinterpret(Int32, rd_u32(h, off))
 @inline rd_f64(h, off::Int) = reinterpret(Float64, (UInt64(rd_u32(h,off)) | (UInt64(rd_u32(h,off+4))<<32)))
 
+# Rotation system of a rot.zlib (either version) or rot.eul file; the contexts of a mixture share one file, so it is built once.
+const ROT_FILE_CACHE = Dict{Tuple{String,Int},RotTables}()
+function load_rot_file(path::String)
+    mode = amap_mode_from_env()
+    key = (realpath(path), mode)
+    haskey(ROT_FILE_CACHE, key) && return ROT_FILE_CACHE[key]
+    if is_rot_zlib_file(path)
+        hdr, blob = open(io -> read_header_csz_blob(io, 16), path, "r")
+        rd_u32(hdr, 0) == ROT_MAGIC || error("bad rot magic in $path")
+        rt = rot_tables_from_blob(rd_u32(hdr, 4), Int(rd_i32(hdr, 8)), Int(rd_i32(hdr, 12)), blob; mode, what = path)
+    else
+        rt = rot_tables_from_eul(path; mode)
+    end
+    return ROT_FILE_CACHE[key] = rt
+end
+
 function load_fmap_zlib(rot_zlib::String, ve_zlib::String)
-    rot_hdr, rot_blob = open(io -> read_header_csz_blob(io, 16), rot_zlib, "r")
-    rd_u32(rot_hdr, 0) == ROT_MAGIC || error("bad rot magic in $rot_zlib")
-    nrot = rd_i32(rot_hdr, 8)
-    nbin = rd_i32(rot_hdr, 12)
+    rt = load_rot_file(rot_zlib)
+    nrot = rt.nrot; nbin = rt.nbin
 
     ve_hdr, ve_blob = open(io -> read_header_csz_blob(io, 24), ve_zlib, "r")
     rd_u32(ve_hdr, 0) == VE_MAGIC || error("bad ve magic in $ve_zlib")
@@ -42,22 +56,10 @@ function load_fmap_zlib(rot_zlib::String, ve_zlib::String)
     spacing = rd_f64(ve_hdr, 16)
     scl = 1.0 / spacing
 
-    nbin3 = Int(nbin)^3
-    nrot2 = Int(nrot)^2
-    ijk_sz  = nbin3 * 2       # sizeof(tAng)=2 (Int16)
-    ij2k_sz = nrot2 * 2
-    rot_sz  = Int(nrot) * 3 * 8   # skipped euler_angles, still need the offset
-    off = 0
-    angle_indices = reinterpret(Int16, rot_blob[off+1:off+ijk_sz]); off += ijk_sz
-    angle_mapping = reinterpret(Int16, rot_blob[off+1:off+ij2k_sz]); off += ij2k_sz
-    off += rot_sz   # skip euler_angles (unused downstream, same as fmap_zlib.c's own callers)
-    rotation_matrices = reinterpret(Float64, rot_blob[off+1:off+Int(nrot)*9*8])
-
     energy_data = reinterpret(Int8, ve_blob)
 
     return GridData(Int32(nrot), Int32(blen), Int32(nbin), scl,
-                     Vector{Int16}(angle_indices), Vector{Int16}(angle_mapping),
-                     Vector{Float64}(rotation_matrices), Vector{Int8}(energy_data))
+                     rt.aidx, rt.amap, rt.rotm, Vector{Int8}(energy_data))
 end
 
 # load_fmap_paths - reads a production fmap.paths file (main_gemc_gpu.cu's
@@ -147,18 +149,11 @@ function load_fmap_paths_gpu(paths_file::String, n_types::Int32)
     blens = Int32[]
     for k in 1:n_ctx
         rot_path = String(strip(lines[2k-1])); ve_path = String(strip(lines[2k]))
-        rot_hdr, rot_blob = open(io -> read_header_csz_blob(io, 16), rot_path, "r")
-        rd_u32(rot_hdr, 0) == ROT_MAGIC || error("bad rot magic in $rot_path")
-        nrot = Int(rd_i32(rot_hdr, 8)); nbin = Int(rd_i32(rot_hdr, 12))
+        rt = load_rot_file(rot_path)
+        nrot = rt.nrot; nbin = rt.nbin
         ve_nrot, blen, scl = read_ve_header(ve_path)
         ve_nrot == nrot || error("nrot mismatch between $rot_path and $ve_path")
-
-        nbin3 = nbin^3; nrot2 = nrot^2
-        off = 0
-        aidx = Vector{Int16}(reinterpret(Int16, rot_blob[off+1:off+nbin3*2])); off += nbin3*2
-        amap = Vector{Int16}(reinterpret(Int16, rot_blob[off+1:off+nrot2*2])); off += nrot2*2
-        off += nrot * 3 * 8   # euler angles, unused
-        rotm = Vector{Float64}(reinterpret(Float64, rot_blob[off+1:off+nrot*9*8]))
+        aidx, amap, rotm = rt.aidx, rt.amap, rt.rotm
 
         if rot === nothing
             rot = (nrot, nbin, scl, aidx, amap, rotm)

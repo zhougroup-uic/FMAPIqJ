@@ -181,9 +181,9 @@ function stage1(p::Pipeline, pqr_file, ion, temp, escl, vscl, threads; nrot = 72
         gbin(s) = joinpath(BIN_DIR, s)
         grid(script, args...; kw...) = run_in(`$(julia_tool(script; threads)) $(collect(args))`, wd; kw...)
 
-        # fmap writes fmap.{rot,ve}.zlib directly (no ve/ directory). Grids of an earlier (python) run
+        # fmap writes fmap.ve.zlib directly (no ve/ directory). Grids of an earlier (python) run
         # (ve/tErn.*.mat.gz) are reused: only the packed format is added.
-        have_zlib = isfile(joinpath(wd, "fmap.ve.zlib")) && isfile(joinpath(wd, "fmap.rot.zlib")) &&
+        have_zlib = isfile(joinpath(wd, "fmap.ve.zlib")) &&
                     isfile(joinpath(wd, "fmap.ern"))
         have_ve = isfile(joinpath(wd, "parms.txt")) && isfile(joinpath(wd, "fmap.ern")) &&
                   isdir(joinpath(wd, "ve")) && length(readdir(joinpath(wd, "ve"))) == nrot
@@ -207,7 +207,9 @@ function stage1(p::Pipeline, pqr_file, ion, temp, escl, vscl, threads; nrot = 72
 
             grid("fmapstat.jl", "stats", "--ern", "fmap.ern") || return "Error: fmapstat failed"
         end
-        write(joinpath(wd, "fmap.paths"), "fmap.rot.zlib\nfmap.ve.zlib\n")
+        # the rotation system (angle tables) is built by the simulation from the rot.eul of the sample set
+        cp(ang, joinpath(wd, "rot.eul"); force = true)
+        write(joinpath(wd, "fmap.paths"), "rot.eul\nfmap.ve.zlib\n")
 
         load_data!(p; stage = 1)
         return "Stage 1 Complete!\n$(p.params)"

@@ -7,7 +7,7 @@ Monte Carlo (NVT) sampling and a Debye-type scattering calculation. Everything i
 Pipeline (one command, `bin/fmapiq.jl`):
 
 1. **energy maps** `fmappre` → `fmap` → `fmapstat`: protein–crowder energy grids for 72 orientations,
-   written directly as `fmap.ve.zlib` / `fmap.rot.zlib` (no intermediate files).
+   written directly as `fmap.ve.zlib` (no intermediate files).
 2. **simulation** `simulation_nvt` / `simulation_nvt_gpu`: independent NVT Monte Carlo runs (box with
    N proteins), all replicas at once on the GPU.
 3. **scattering** `sim2iq`: P(q) of one protein and I(q) of every configuration (FFT grid), then
@@ -112,4 +112,17 @@ docs/        notes on the pipeline options
   within the statistical noise of the runs: rms difference / combined SEM about 1.1-1.3 for 64 runs). Grid generation time is unchanged
   (the spreading itself is 3x faster on the CPU and 30% on the GPU, but it is under 0.1% of one orientation). The generator and the closed form
   are in the FMAPlattice repository.
+- Rotation system and the pair table `angle_mapping` (`angij2k`, nrot^2 16-bit entries: 42.5 MB at 4608 orientations, read at every pair
+  energy). The simulations (CPU and GPU) take it in one of three forms, `AMAP_FOLD` (environment): `0` plain table (default), `1` the
+  symmetry-folded, bit-packed table read in place (5.9 MB at 4608, same entries as `0` built from the Euler angles, so identical results),
+  `2` no table: the index is looked up at every pair from `R_i' R_j` and the `angijk` bin table (approximate: same sample as the exact table
+  for 89% of the pairs, mean excess angle 0.09 deg, worst 8 deg; for sample lists whose n^2 table does not fit). The tables are built by the
+  Rotij package (`src/sim/rotij`, GPL-2.0-or-later; the same code as `rotij/julia`, with the folded tables and the lookup), see
+  `src/sim/rotsys.jl`. There is no `fmap.rot.zlib` any more: the rotation system (bin table, rotation matrices, pair table) is built when
+  a simulation starts from the `rot.eul` of the sample set (`data/sspNF<nrot>/rot.eul` is the only rotation file; the pipeline copies it to the
+  work directory and `fmap.paths` lists `rot.eul` and `fmap.ve.zlib`). The build takes a few seconds (the folded search, about 6 s at 4608
+  orientations with 8 threads). A `rot.zlib` of an earlier version (with or without the table) in `fmap.paths` is still read.
+  Tables built from the Euler angles (modes 0/1) differ from the exhaustive-search table only at near-ties
+  (72 samples: 7% of the entries, the returned sample at most 1.2e-4 deg farther than the nearest one; 4608: 0.6%). n200_test (GPU, 64 runs) passes
+  with every mode on the GPU and the CPU (a plain table read from an old `rot.zlib` reproduces C05 exactly; lookup fails one point of the 3-run CPU example, which has large noise).
 - License: GPL-3.0 (see `LICENSE`).

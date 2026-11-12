@@ -42,7 +42,7 @@ struct GridData
     nbin::Int32
     scl::Float64
     angle_indices::Vector{Int16}
-    angle_mapping::Vector{Int16}
+    angle_mapping::AMapC
     rotation_matrices::Vector{Float64}
     energy_data::AbstractVector{Int8}   # host Vector, or a CuVector when streamed straight to the GPU
 end
@@ -76,7 +76,7 @@ struct GridSetData
     nbin::Int32
     scl::Float64
     angle_indices::Vector{Int16}
-    angle_mapping::Vector{Int16}
+    angle_mapping::AMapC
     rotation_matrices::Vector{Float64}
     energy_ctxs::Vector{<:AbstractVector{Int8}}   # length n_ctx; CuVectors when streamed to the GPU (load_fmap_paths_gpu)
     n_types::Int32
