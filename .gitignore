@@ -2,3 +2,4 @@ work_*/
 examples/*/work_*/
 *.tar.gz
 native/*.so
+examples/*/env_notebook/

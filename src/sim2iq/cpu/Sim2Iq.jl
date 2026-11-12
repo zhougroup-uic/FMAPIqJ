@@ -15,7 +15,6 @@ Julia port of the C core of sim2iq-pkg (ext/*.c).  File layout mirrors the C sou
 """
 module Sim2Iq
 
-using FFTW
 using Printf
 
 include("cromer_mann.jl")

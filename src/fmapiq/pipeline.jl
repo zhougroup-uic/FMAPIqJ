@@ -30,8 +30,10 @@ const PLOT_KEYS = (:show_individual, :show_pq, :q_min, :q_max, :y_min, :y_max, :
 
 # ---------------------------------------------------------------- tool invocation
 
+# the environment of the tools: the repository's, or FMAPIQ_PROJECT (a notebook keeps its own, with FFTW only for CPU runs)
+const PROJECT = get(ENV, "FMAPIQ_PROJECT", ROOT)
 julia_tool(script; threads = 1) =
-    `$(Base.julia_exename()) --project=$ROOT -t $threads $(joinpath(BIN_DIR, script))`
+    `$(Base.julia_exename()) --project=$PROJECT -t $threads $(joinpath(BIN_DIR, script))`
 
 """
 Run `cmd` in `dir`; `out` / `err` are file paths (or nothing = inherit). Success is returned.
@@ -498,7 +500,8 @@ options:
   -h, --help             show this help
 
 Environment: TERN_BYTES (default 1) grid cell format;
-  FMAPIQ_ROOT location of grid/, sim/, sim2iq/, data/.
+  FMAPIQ_ROOT location of grid/, sim/, sim2iq/, data/;
+  FMAPIQ_PROJECT Julia environment of the tools (default: the repository).
 """
 
 function parse_cli(argv)

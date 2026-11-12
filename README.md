@@ -28,7 +28,8 @@ Every GPU stage calls a CUDA C library in `native/` through `ccall`; Julia needs
 `libfmapgrid.so` (energy maps, `fmapdd`), `libfmapsim.so` (the NVT Monte Carlo engine) and `libfmapsim2iq.so` (I(q)). Build once on a
 node with the toolkit: `module load CUDA && make -C native` (`ARCHS="80 89"` to narrow; `FMAPGRID_LIB`, `FMAPSIM_LIB`,
 `FMAPSIM2IQ_LIB` relocate a library). The pair energy itself is the header `native/fmap_core.h` (host + device), the interface of each
-library is in `native/*.h`; see `native/README.md`. Checks: `test/native_grid.jl`, `test/native_sim.jl`, `test/test_sim2iq_gpu.sh`.
+library is in `native/*.h`; see `native/README.md`. FFTW is loaded only by the CPU stages (energy maps, I(q)), so a GPU run needs
+no FFTW; the notebook adds it to its own environment for CPU runs only. Checks: `test/native_grid.jl`, `test/native_sim.jl`, `test/test_sim2iq_gpu.sh`.
 
 ## Install
 ```

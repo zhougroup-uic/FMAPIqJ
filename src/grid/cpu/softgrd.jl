@@ -20,11 +20,11 @@ mutable struct SoftCtx
 end
 
 function SoftCtx(l::Int; tern::Int = tern_bytes_from_env())
-    FFTW.set_num_threads(Threads.nthreads())
+    isdefined(@__MODULE__, :fft_plans) || Base.include(@__MODULE__, joinpath(@__DIR__, "fftw_cpu.jl"))   # loads FFTW (CPU only)
     working = zeros(l, l, l)
     ft = Array{ComplexF64}(undef, l ÷ 2 + 1, l, l)
-    plan_f = plan_rfft(working; flags = FFTW.ESTIMATE)
-    plan_b = plan_irfft(ft, l; flags = FFTW.ESTIMATE)
+    f = Base.invokelatest(getglobal, @__MODULE__, :fft_plans)           # defined just now: look it up in the newest world
+    plan_f, plan_b = Base.invokelatest(f, working, ft, l)
     return SoftCtx(l, tern, plan_f, plan_b, Dict{Symbol,Array{ComplexF64,3}}(),
                    working, zeros(l, l, l), zeros(l, l, l), zeros(l, l, l), falses(l, l, l), ft)
 end

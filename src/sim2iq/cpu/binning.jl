@@ -16,10 +16,9 @@ end
 
 # In-place forward 3D complex FFT (single precision, FFTW_ESTIMATE as in C)
 function calculate_fft!(A::Array{ComplexF32,3})
-    FFTW.set_num_threads(Threads.nthreads())
-    plan = plan_fft!(A; flags = FFTW.ESTIMATE)
-    plan * A
-    return A
+    isdefined(@__MODULE__, :fft_forward!) || Base.include(@__MODULE__, joinpath(@__DIR__, "fftw_cpu.jl"))   # loads FFTW (CPU only)
+    f = Base.invokelatest(getglobal, @__MODULE__, :fft_forward!)        # defined just now: look it up in the newest world
+    return Base.invokelatest(f, A)
 end
 
 # ---- binning (binning.c) ----

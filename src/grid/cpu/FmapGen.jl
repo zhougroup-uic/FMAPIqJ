@@ -11,7 +11,7 @@ module FmapGen
 
 using Printf
 using LinearAlgebra
-using FFTW
+# FFTW is loaded on demand by the CPU energy-map context (fftw_cpu.jl); the GPU path (cuFFT in native/) does not need it
 
 include(joinpath(@__DIR__, "..", "..", "spt", "Spt.jl")); using .Spt
 
