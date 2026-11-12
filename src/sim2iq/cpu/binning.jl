@@ -62,7 +62,7 @@ function accumulate_intensity!(bins::BinData, ft_vac::Array{ComplexF32,3},
     lcnt = [zeros(Int, nb) for _ in 1:nt]
     qmax = bins.qmax
     bw = bins.q_bin_width
-    Threads.@threads :static for ti in 1:nt
+    Threads.@threads for ti in 1:nt       # per-iteration accumulators (not threadid): any schedule
         sums = lsums[ti]; qs = lqs[ti]; cnt = lcnt[ti]
         @inbounds for k in ti:nt:N
             qz2 = qv.qz[k]^2

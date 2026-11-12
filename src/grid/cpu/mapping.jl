@@ -45,7 +45,7 @@ function map_R!(grd::Array{Float64,3}, atoms::Vector{Atom}, coeffs::Vector{Float
         jmin[a] = floor(Int, atoms[a].y - s); jmax[a] = ceil(Int, atoms[a].y + s)
         kmin[a] = floor(Int, atoms[a].z - s); kmax[a] = ceil(Int, atoms[a].z + s)
     end
-    Threads.@threads :static for px in 0:l-1
+    Threads.@threads for px in 0:l-1       # each iteration writes its own x-plane: any schedule, also nested or from a spawned task
         @inbounds for a in 1:na
             at = atoms[a]
             rup2 = rups[a] * rups[a]
