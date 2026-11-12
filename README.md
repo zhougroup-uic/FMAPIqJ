@@ -2,12 +2,12 @@
 
 Small-angle X-ray scattering I(q) of concentrated protein solutions from FMAP energy maps,
 Monte Carlo (NVT) sampling and a Debye-type scattering calculation. Everything is Julia
-(CUDA.jl for the GPU paths); the original C/CUDA sources are kept in `reference/` for comparison.
+(the GPU paths are CUDA C libraries in `native/` called from Julia); the original C/CUDA sources are kept in `reference/` for comparison.
 
 Pipeline (one command, `bin/fmapiq.jl`):
 
 1. **energy maps** `fmappre` → `fmap` → `fmapstat`: protein–crowder energy grids for 72 orientations,
-   written directly as `fmap.ve.zlib` (no intermediate files).
+   written directly as `fmap.ve.sp2p`, the spatially compressed grid (`src/spt/Spt.jl`; no intermediate files, no zlib).
 2. **simulation** `simulation_nvt` / `simulation_nvt_gpu`: independent NVT Monte Carlo runs (box with
    N proteins), all replicas at once on the GPU.
 3. **scattering** `sim2iq`: P(q) of one protein and I(q) of every configuration (FFT grid), then
@@ -15,12 +15,20 @@ Pipeline (one command, `bin/fmapiq.jl`):
 
 ## Requirements
 - Julia ≥ 1.9 (developed and tested with 1.12).
-- GPU mode: an NVIDIA GPU with driver (CUDA.jl downloads its own toolkit). Memory: about 6 GB for the
+- GPU mode: an NVIDIA GPU with driver and the CUDA toolkit once, to build the libraries in `native/` (`module load CUDA && make -C native`); Julia itself needs no CUDA package. Memory: about 6 GB for the
   energy maps and the N=200 example; the N=800 example was run on a 46 GB L40 (984³ FFT grid; smaller cards untested).
 - CPU mode works without a GPU but is much slower. Measured on 8 cores (N=200): energy maps about 19 min,
   then about 40 s per I(q); the Monte Carlo run time of 20000 cycles per replica on the CPU was not benchmarked.
-- Disk: about 0.3 GB per work directory (`fmap.ve.zlib`).
+- Disk: about 0.4 GB per work directory (`fmap.ve.sp2p`). Both engines (GPU and CPU) turn it directly into the block-sparse
+  lookup table (SPT=1), about 2.7 GB for the N=200 example instead of the 5.7 GB dense grid; a dense grid is never made.
 - Python (numpy) is only needed for the optional `tools/traj2pdb.py`; no C extension anywhere.
+
+## Native GPU libraries (no CUDA.jl)
+Every GPU stage calls a CUDA C library in `native/` through `ccall`; Julia needs only the shared libraries and the NVIDIA driver:
+`libfmapgrid.so` (energy maps, `fmapdd`), `libfmapsim.so` (the NVT Monte Carlo engine) and `libfmapsim2iq.so` (I(q)). Build once on a
+node with the toolkit: `module load CUDA && make -C native` (`ARCHS="80 89"` to narrow; `FMAPGRID_LIB`, `FMAPSIM_LIB`,
+`FMAPSIM2IQ_LIB` relocate a library). The pair energy itself is the header `native/fmap_core.h` (host + device), the interface of each
+library is in `native/*.h`; see `native/README.md`. Checks: `test/native_grid.jl`, `test/native_sim.jl`, `test/test_sim2iq_gpu.sh`.
 
 ## Install
 ```
@@ -82,7 +90,7 @@ Choose a GPU runtime (T4, 16 GB): the N=200 example fits; the N=800 production g
 
 ## Layout
 ```
-bin/         command-line tools: fmapiq fmappre fmap fmapstat fmap_pack_zlib simulation_nvt simulation_nvt_gpu
+bin/         command-line tools: fmapiq fmappre fmap fmapstat simulation_nvt simulation_nvt_gpu
              sim2iqpre sim2iq sim2iq_gpu sim2iq_gpu_batch
 src/grid/    energy maps (cpu/, gpu/)        src/sim/     NVT Monte Carlo (cpu/, gpu/)
 src/sim2iq/  scattering (cpu/, gpu/)         src/fmapiq/  pipeline driver
@@ -103,7 +111,7 @@ docs/        notes on the pipeline options
   shifts I(q) by at most ~2% (within the run-to-run error); the `expected/` files were regenerated with this
   fix (GPU, 64 runs) and differ from the old ones by that amount. Same change in `reference/maeppi/fmap_energy.c`.
 - The 10-point second-order charge spreading (Qin & Zhou, JCTC 2014, 10, 2824) is computed from its closed form, per atom
-  (`map_L2nd!` in `src/grid/cpu/mapping.jl`, the CUDA kernel in `src/grid/gpu/gpu.jl`, `Map2GrdL2nd` in `reference/fmapb2/map.c`); the
+  (`map_L2nd!` in `src/grid/cpu/mapping.jl`, the CUDA kernel in `native/fmapgrid.cu`, `Map2GrdL2nd` in `reference/fmapb2/map.c`); the
   table `data/lattice.txt` (1000 sub-grid positions, weights from a least-squares solve) is removed. The formulas are the same ones the
   table sampled, so the weights now use the exact position of the atom inside its cell instead of its 0.1-cell, and they satisfy
   the moment conditions exactly (the table of earlier versions also missed the y*z condition: error up to 0.34). Energy maps
@@ -120,8 +128,8 @@ docs/        notes on the pipeline options
   Rotij package (`src/sim/rotij`, GPL-2.0-or-later; the same code as `rotij/julia`, with the folded tables and the lookup), see
   `src/sim/rotsys.jl`. There is no `fmap.rot.zlib` any more: the rotation system (bin table, rotation matrices, pair table) is built when
   a simulation starts from the `rot.eul` of the sample set (`data/sspNF<nrot>/rot.eul` is the only rotation file; the pipeline copies it to the
-  work directory and `fmap.paths` lists `rot.eul` and `fmap.ve.zlib`). The build takes a few seconds (the folded search, about 6 s at 4608
-  orientations with 8 threads). A `rot.zlib` of an earlier version (with or without the table) in `fmap.paths` is still read.
+  work directory and `fmap.paths` lists `rot.eul` and `fmap.ve.sp2p`). The build takes a few seconds (the folded search, about 6 s at 4608
+  orientations with 8 threads). 
   Tables built from the Euler angles (modes 0/1) differ from the exhaustive-search table only at near-ties
   (72 samples: 7% of the entries, the returned sample at most 1.2e-4 deg farther than the nearest one; 4608: 0.6%). n200_test (GPU, 64 runs) passes
   with every mode on the GPU and the CPU (a plain table read from an old `rot.zlib` reproduces C05 exactly; lookup fails one point of the 3-run CPU example, which has large noise).

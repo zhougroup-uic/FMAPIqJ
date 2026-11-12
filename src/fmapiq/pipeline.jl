@@ -1,6 +1,6 @@
 # pipeline.jl - FMAPIq pipeline command line (Julia replacement of fmapiq-pkg/pipeline.py).
 #
-#   stage 1  energy maps : fmappre -> fmap -> fmapstat -> fmap_pack_zlib        (src/grid)
+#   stage 1  energy maps : fmappre -> fmap (fmap.ve.sp2p) -> fmapstat        (src/grid)
 #   stage 2  simulation  : n_reps NVT runs (same-box insertion engine, src/sim)
 #   stage 3  scattering  : sim2iq pre + P(q) + one I(q) per configuration       (src/sim2iq)
 #   then     statistics (Iqs.stat.txt), plot (iq_plot.svg) and optional packing.
@@ -13,8 +13,6 @@ using Printf
 using Statistics
 using DelimitedFiles
 using JSON
-using Tar
-using CodecZlib
 
 const ROOT = get(ENV, "FMAPIQ_ROOT", normpath(joinpath(@__DIR__, "..", "..")))
 const BIN_DIR = joinpath(ROOT, "bin")
@@ -181,17 +179,11 @@ function stage1(p::Pipeline, pqr_file, ion, temp, escl, vscl, threads; nrot = 72
         gbin(s) = joinpath(BIN_DIR, s)
         grid(script, args...; kw...) = run_in(`$(julia_tool(script; threads)) $(collect(args))`, wd; kw...)
 
-        # fmap writes fmap.ve.zlib directly (no ve/ directory). Grids of an earlier (python) run
-        # (ve/tErn.*.mat.gz) are reused: only the packed format is added.
-        have_zlib = isfile(joinpath(wd, "fmap.ve.zlib")) &&
-                    isfile(joinpath(wd, "fmap.ern"))
-        have_ve = isfile(joinpath(wd, "parms.txt")) && isfile(joinpath(wd, "fmap.ern")) &&
-                  isdir(joinpath(wd, "ve")) && length(readdir(joinpath(wd, "ve"))) == nrot
-        if have_zlib
+        # fmap writes the spatially compressed grid fmap.ve.sp2p directly (no ve/ directory)
+        have_sp2p = isfile(joinpath(wd, "parms.txt")) && isfile(joinpath(wd, "fmap.ern")) &&
+                    isfile(joinpath(wd, "fmap.ve.sp2p"))
+        if have_sp2p
             println("Energy maps found in $wd")
-        elseif have_ve
-            println("Energy maps found in $wd, packing only")
-            grid("fmap_pack_zlib.jl", "parms.txt", "fmap") || return "Error: fmap_pack_zlib failed"
         else
             vscl_arg = vscl < 0.0 ? "-" : string(vscl)
             grid("fmappre.jl", "-o", "parms.txt", "subA.pqr", string(ion), string(temp), string(escl), vscl_arg) ||
@@ -202,14 +194,14 @@ function stage1(p::Pipeline, pqr_file, ion, temp, escl, vscl, threads; nrot = 72
             end
 
             env = p.gpu ? ["FMAPB2_GPU" => "1"] : ["FMAPB2_GPU" => "0"]
-            grid("fmap.jl", "subA.vdw", "parms.txt", ang, "--zlib", "fmap"; out = joinpath(wd, "fmap.ern"),
+            grid("fmap.jl", "subA.vdw", "parms.txt", ang, "--sp2p", "fmap"; out = joinpath(wd, "fmap.ern"),
                  err = joinpath(wd, "fmap.log"), env) || return "Error: fmap failed"
 
             grid("fmapstat.jl", "stats", "--ern", "fmap.ern") || return "Error: fmapstat failed"
         end
         # the rotation system (angle tables) is built by the simulation from the rot.eul of the sample set
         cp(ang, joinpath(wd, "rot.eul"); force = true)
-        write(joinpath(wd, "fmap.paths"), "rot.eul\nfmap.ve.zlib\n")
+        write(joinpath(wd, "fmap.paths"), "rot.eul\nfmap.ve.sp2p\n")
 
         load_data!(p; stage = 1)
         return "Stage 1 Complete!\n$(p.params)"
@@ -328,7 +320,7 @@ function stage3(p::Pipeline, box_size, spacing, threads)
             success(proc) || return "Error: GPU sim2iq failed (see sim2iq_gpu.log)"
         else
             run_in(`$pre -f subA.vdw -o subA.vol`, wd) || return "Error: sim2iq_pre failed"
-            if p.gpu       # all runs in one julia/CUDA.jl process (sim2iq/gpu): P(q), then one I(q) per configuration
+            if p.gpu       # all runs in one process on native/libfmapsim2iq.so (sim2iq/gpu): P(q), then one I(q) per configuration
                 jobs = [pq_file * "=-"; [@sprintf("iq_%03d.dat=%s", i - 1, c) for (i, c) in enumerate(p.configs)]]
                 batch = julia_tool("sim2iq_gpu_batch.jl")
                 log = joinpath(wd, "sim2iq_gpu.log")
@@ -455,19 +447,17 @@ function pack_results(p::Pipeline; skip_energy_maps = true, skip_raw_data = true
         name = basename(normpath(p.work_dir))
         archive = joinpath(p.work_dir, name * ".tar.gz")
         rm(archive; force = true)
-        keep(path) = begin
-            rel = relpath(path, p.work_dir)
-            parts = splitpath(rel)
-            (endswith(rel, ".tar.gz") || endswith(rel, ".tar.gz.part")) && return false
-            skip_energy_maps && !isempty(parts) && parts[1] == "ve" && return false
-            skip_raw_data && isfile(path) && endswith(rel, ".dat") && return false
-            return true
-        end
-        tmp = archive * ".part"
-        open(tmp, "w") do io
-            gz = GzipCompressorStream(io)
-            Tar.create(keep, p.work_dir, gz)
-            close(gz)
+        # the system tar and gzip do the archive (no Julia compression library)
+        ex = String["--exclude=*.tar.gz", "--exclude=*.tar.gz.part"]
+        skip_energy_maps && push!(ex, "--exclude=" * name * "/fmap.ve.sp2p")
+        skip_raw_data && push!(ex, "--exclude=*.dat")
+        parent = dirname(abspath(p.work_dir))
+        tmp = joinpath(parent, name * ".tar.gz.part$(getpid())")     # outside the packed directory, which must not change while tar reads it
+        try
+            run(`tar -czf $tmp $ex -C $parent $name`)
+        catch
+            rm(tmp; force = true)
+            rethrow()
         end
         mv(tmp, archive; force = true)
         return archive, @sprintf("Archive created: %s (%.1f MB)", basename(archive), filesize(archive) / 2^20)
@@ -494,7 +484,7 @@ options:
   --skip-raw-data        Skip raw data (*.dat) when packing
   --threads N            Total threads (default: CPU cores / 2)
   --sim-threads N        Threads per simulation job (default: 2)
-  --gpu                  Run all stages on the GPU: energy maps (CUDA.jl), NVT (sim/gpu), I(q) (sim2iq/gpu, CUDA.jl)
+  --gpu                  Run all stages on the GPU: energy maps, NVT (sim/gpu), I(q) (sim2iq/gpu): CUDA C libraries in native/
   --n-proteins N         number of proteins (default: 200)
   --box-size L           box edge length, Å (default: 619.65)
   --ion C                ionic strength, M (default: 0.016)
@@ -507,7 +497,7 @@ options:
   --spacing X            I(q) grid spacing, Å (default: 1.0)
   -h, --help             show this help
 
-Environment: TERN_BYTES (default 1) grid cell format; FMAPIQ_CACHE raw-grid cache directory;
+Environment: TERN_BYTES (default 1) grid cell format;
   FMAPIQ_ROOT location of grid/, sim/, sim2iq/, data/.
 """
 

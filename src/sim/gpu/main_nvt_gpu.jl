@@ -1,10 +1,12 @@
-# main_nvt_gpu.jl - NVT Monte Carlo of protein solutions on the GPU (CUDA.jl).
+# main_nvt_gpu.jl - NVT Monte Carlo of protein solutions on the GPU (native/libfmapsim.so).
 #
 # One process runs all independent replicas ("triples") at once: every replica has its own box, RNG
 # stream (seed + replica) and step-size adaptation; the displacement and insertion kernels of all
 # replicas are launched together and synchronized once per sub-batch. A step is a displacement
 # (translation or rotation) or, with probability transfer_freq, a same-box insertion (a particle is
 # removed and re-inserted at a random position). Energies come from the FMAP grids (fmap.paths).
+#
+# GPU numerics: native/libfmapsim.so (CUDA C, no CUDA.jl); this file is the run logic.
 #
 # Usage:
 #   julia --project=<root> bin/simulation_nvt_gpu.jl N box_list TE_list n_cycles seed start stop \
@@ -14,14 +16,9 @@
 #   Defaults: max_trans/max_rot/zratio 1, transfer_freq 0.1, target_ratio 0.3, n_types 1,
 #   ns_freq/conf_freq 0 (disabled), adjust_cycles 10 (0 = frozen step sizes). v1 is ignored (one box).
 # Requires TERN_BYTES to match the grid (1 = summed channel, the pipeline default; 2 = [elec, vdw]).
-using CUDA
 using Printf
-include("../rotsys.jl")           # rotation tables, pair-table modes (AMAP_FOLD), Rotij
-include("kernels.jl")
-include("gemc_box.jl")
-include("fmap_zlib_loader.jl")   # defines load_fmap_zlib/load_fmap_paths -
-                                  # after gemc_box.jl since they construct
-                                  # GridData/GridSetData (defined there)
+include("../rotsys.jl")           # rotation tables from rot.eul (plain pair table), Rotij
+include("nvt_native.jl")          # libfmapsim.so: tables, boxes and moves on the GPU, host-side helpers
 
 function kbt_to_celsius(kbt::Float64)
     N_A = 6.022045000e23; k_B = 3.297623030e-24
@@ -84,32 +81,9 @@ function main()
     rdir = "R" * lpad(string(seed), rpad, '0')
 
     println("Loading grid contexts from $fmap_paths (n_types=$n_types) ..."); flush(stdout)
-    # Energy grids are inflated in chunks straight into device memory (like
-    # the C GPU driver) - no uncompressed host copy is ever built.
-    gridset = load_fmap_paths_gpu(fmap_paths, Int32(n_types))
-    n_ctx = length(gridset.energy_ctxs)
-    d_energy_ctxs = Tuple(gridset.energy_ctxs)
-    d_aidx   = CuArray(gridset.angle_indices)
-    d_rotmat = CuArray(gridset.rotation_matrices)
-    d_amap   = amap_device(gridset.angle_mapping, d_aidx, d_rotmat)   # plain / folded / lookup
-    # CuArrays are implicitly synchronized by default whenever they're
-    # accessed from a different CUDA stream than they were last used on
-    # (CUDA.jl's array.jl docstring for enable_synchronization!) - with
-    # every one of the triples' streams reading these SAME shared grid
-    # arrays, that turns into a full serialization chain across all
-    # triples (empirically confirmed: 119 triples went from 38s down to
-    # 0.006s after disabling this here - see mixbench/concurrencyProbe
-    # notes). Safe to disable: these arrays are uploaded once and never
-    # written to again for the rest of the run, so there is no actual
-    # race for the safety synchronization to protect against.
-    CUDA.enable_synchronization!.(d_energy_ctxs, false)
-    CUDA.enable_synchronization!(d_aidx, false)
-    for a in (d_amap isa DFold ? (d_amap.rrow, d_amap.rg, d_amap.PL, d_amap.data) : d_amap isa AbstractArray ? (d_amap,) : ())
-        CUDA.enable_synchronization!(a, false)
-    end
-    CUDA.enable_synchronization!(d_rotmat, false)
+    gridset = load_fmap_paths_native(fmap_paths, n_types)
+    n_ctx = n_types * (n_types + 1) ÷ 2
     println("Grid loaded: nrot=$(gridset.nrot) nbin=$(gridset.nbin) n_ctx=$n_ctx blens=$(gridset.blens)"); flush(stdout)
-    grid_views = [mk_grid_set(gridset, d_energy_ctxs, d_aidx, d_amap, d_rotmat, escls[r], vscls[r]) for r in 1:n_replicas]
 
     # type_counts_total is totals across BOTH boxes (matches
     # main_gemc_gpu.cu's argv[16] convention) - split proportionally by v1,
@@ -144,8 +118,8 @@ function main()
         L = box_list[b]
         L1 = L
         L2 = L
-        boxdim1 = SVector(L1, L1, L1 * zratio)
-        boxdim2 = SVector(L2, L2, L2 * zratio)
+        boxdim1 = (L1, L1, L1 * zratio)
+        boxdim2 = (L2, L2, L2 * zratio)
         for r in 1:n_replicas
             fi = (b - 1) * n_replicas + r
             replica_of[fi] = r
@@ -166,8 +140,8 @@ function main()
             trajpaths2[fi] = "$outdir/traj.$(idx_stop).2.txt"
 
             if !use_traj
-                pos1, bins1, ptype1, ridx1, state1 = random_particles(state1, n1_ini, boxdim1, tc1, gridset, grid_views[r])
-                pos2, bins2, ptype2, ridx2, state2 = random_particles(state2, n2_ini, boxdim2, tc2, gridset, grid_views[r])
+                pos1, bins1, ptype1, ridx1, state1 = random_particles(gridset, escls[r], vscls[r], state1, n1_ini, boxdim1, tc1)
+                pos2, bins2, ptype2, ridx2, state2 = random_particles(gridset, escls[r], vscls[r], state2, n2_ini, boxdim2, tc2)
                 # Placement may stop short (dense box): the unplaced slots
                 # keep their intended type so reservoir insertion fills the
                 # right species later (C: initialize_random's type commit).
@@ -176,7 +150,8 @@ function main()
                 tail2 = intended_types(tc2, n2_ini)[length(ridx2)+1:end]
             else
                 pos1, bins1, ptype1, ridx1, jsrs1 = load_particles("$outdir/traj.$(idx_start).1.txt", gridset)
-                pos2, bins2, ptype2, ridx2, jsrs2 = load_particles("$outdir/traj.$(idx_start).2.txt", gridset)
+                f2 = "$outdir/traj.$(idx_start).2.txt"                # box 2 is empty in the NVT driver; its file may be absent
+                pos2, bins2, ptype2, ridx2, jsrs2 = isfile(f2) ? load_particles(f2, gridset) : (Float64[], Float64[], Int32[], Int32[], nothing)
 
                 # Top up to N if the loaded configuration is short (e.g. a
                 # crowded box's random placement fell short at an earlier
@@ -208,14 +183,14 @@ function main()
                         end
                         println("[L=$(box_strs[b]) V=$v1 $rdir] Top-up box1+$extra1 box2+$extra2"); flush(stdout)
                         if extra1 > 0
-                            pos1, bins1, ptype1, ridx1, state1 = topup_particles(state1, pos1, bins1, ptype1, ridx1,
-                                                                                 n1c + extra1, boxdim1, topup1, gridset, grid_views[r])
+                            pos1, bins1, ptype1, ridx1, state1 = topup_particles(gridset, escls[r], vscls[r], state1, pos1, bins1, ptype1, ridx1,
+                                                                                 n1c + extra1, boxdim1, topup1)
                             committed1 = n1c + extra1
                             tail1 = intended_types(topup1, extra1)[length(ridx1)-n1c+1:end]
                         end
                         if extra2 > 0
-                            pos2, bins2, ptype2, ridx2, state2 = topup_particles(state2, pos2, bins2, ptype2, ridx2,
-                                                                                 n2c + extra2, boxdim2, topup2, gridset, grid_views[r])
+                            pos2, bins2, ptype2, ridx2, state2 = topup_particles(gridset, escls[r], vscls[r], state2, pos2, bins2, ptype2, ridx2,
+                                                                                 n2c + extra2, boxdim2, topup2)
                             committed2 = n2c + extra2
                             tail2 = intended_types(topup2, extra2)[length(ridx2)-n2c+1:end]
                         end
@@ -223,20 +198,17 @@ function main()
                 end
             end
 
-            box1 = mk_phys_box(pos1, bins1, ptype1, ridx1, Int32(N), boxdim1, state1, max_trans, max_rot, tail1)
-            box2 = mk_phys_box(pos2, bins2, ptype2, ridx2, Int32(1), boxdim2, state2, max_trans, max_rot, tail2)
-            e1_init = compute_total_energy(pos1, ridx1, ptype1, length(ridx1), grid_views[r], boxdim1)
-            e2_init = compute_total_energy(pos2, ridx2, ptype2, length(ridx2), grid_views[r], boxdim2)
-            tr = Triple(box1, box2, box1.lcg, CuArray(zeros(Float64, 8)),
-                        Int32(length(ridx1)), Int32(length(ridx2)),
-                        CuStream(),
+            box1 = NBox(gridset, N, boxdim1, temps[r], escls[r], vscls[r])
+            box_set!(box1, pos1, bins1, [ptype1; tail1], ridx1, state1)
+            e1_init = total_energy(box1, length(ridx1))
+            e2_init = 0.0          # box 2 never holds a molecule in the NVT driver
+            tr = Triple(box1, Int32(length(ridx1)), Int32(length(ridx2)),
                         e1_init, e2_init, 0, 0, 0, 0, 0, 0,
                         Int32(count_type0(ptype1)), Int32(count_type0(ptype2)),
                         StepTune(max_trans * 1.62, max_rot, boxdim1[1], Float64(gridset.nbin) / ROT_DEFAULT),
                         StepTune(max_trans * 1.62, max_rot, boxdim2[1], Float64(gridset.nbin) / ROT_DEFAULT),
                         Int32(committed1), Int32(committed2),
-                        max(0, N - (length(ridx1) + length(ridx2))),
-                        CuArray(zeros(Float64, 4)), CuArray(zeros(Float64, 4)))
+                        max(0, N - (length(ridx1) + length(ridx2))))
             # restore the saved adaptive step sizes (traj header), as the C engine does on load
             if use_traj
                 jsrs1 === nothing || ((tr.tune1.js, tr.tune1.rs) = jsrs1)
@@ -281,90 +253,51 @@ function main()
             disp_per_box = round(Int, chunk * (1.0 - transfer_freq) * 0.5)
             n_transfers  = chunk - 2 * disp_per_box
 
-            # Launch every triple's displacement kernel on its OWN stream
-            # before syncing any of them - this is what lets the GPU
-            # actually run many triples concurrently (up to CUDA CC8.9's
-            # 128-resident-grid limit) instead of
-            # serializing on the default stream.
-            for (fi, tr) in enumerate(triples)
-                gv = grid_views[replica_of[fi]]
-                temp = temps[replica_of[fi]]
-                mc_batch_launch!(as_boxview(tr.box1), as_boxview(tr.box2), gv, disp_per_box, temp,
-                                  tr.n_active1, tr.n_active2,
-                                  tr.tune1.js, tr.tune1.rs, tr.tune2.js, tr.tune2.rs;
-                                  stream=tr.stream)
+            # Launch every replica's displacement kernel (each box has its own stream) before waiting for any of them, so the
+            # GPU runs the replicas concurrently.
+            for tr in triples
+                mc_launch!(tr.box1, tr.n_active1, disp_per_box, tr.tune1.js, tr.tune1.rs)
             end
-            CUDA.synchronize()
+            hmcs = [wait_box(tr.box1; mc = true)[1] for tr in triples]      # [delta, n_accepted, try_t, acc_t, try_r, acc_r]
 
-            # Triples still short of N (deficit > 0) skip the transfer
-            # kernel this sub-batch and spend its transfer budget on
-            # reservoir insertions instead (C driver: same split). The
-            # window's budget is halved between the boxes, each box's share
-            # of the remaining deficit is clamped to its own committed room,
-            # and what one box can't use goes to its partner.
+            # Replicas still short of N (deficit > 0) skip the insertion move this sub-batch and spend its budget on reservoir
+            # insertions instead (C driver: same split). Box 2 is always empty in the NVT driver (no committed room), so the whole
+            # deficit goes to box 1.
             did_transfer = falses(length(triples))
-            did_res1 = falses(length(triples)); did_res2 = falses(length(triples))
+            did_res1 = falses(length(triples))
             for (fi, tr) in enumerate(triples)
-                gv = grid_views[replica_of[fi]]
-                temp = temps[replica_of[fi]]
                 if tr.deficit == 0
                     did_transfer[fi] = true
-                    nvt_insert_launch!(as_transferboxview(tr.box1), gv, n_transfers, temp,
-                                        tr.transfer_lcg, tr.transfer_result, tr.n_active1;
-                                        stream=tr.stream)
+                    insert_launch!(tr.box1, tr.n_active1, n_transfers)
                 else
                     half  = max(n_transfers ÷ 2, 1)
-                    want1 = (tr.deficit + 1) ÷ 2
-                    want2 = tr.deficit - want1
-                    room1 = max(0, Int(tr.committed1) - Int(tr.n_active1))
-                    room2 = max(0, Int(tr.committed2) - Int(tr.n_active2))
-                    if want1 > room1; want2 += want1 - room1; want1 = room1; end
-                    if want2 > room2; want1 += want2 - room2; want2 = room2; end
-                    want1 = min(want1, room1)
+                    want1 = min(tr.deficit, max(0, Int(tr.committed1) - Int(tr.n_active1)))
                     if want1 > 0
                         did_res1[fi] = true
-                        reservoir_insert_launch!(as_transferboxview(tr.box1), gv, half, want1, temp,
-                                                  tr.box1.lcg, tr.res_result1,
-                                                  tr.n_active1, tr.committed1; stream=tr.stream)
-                    end
-                    if want2 > 0
-                        did_res2[fi] = true
-                        reservoir_insert_launch!(as_transferboxview(tr.box2), gv, half, want2, temp,
-                                                  tr.box2.lcg, tr.res_result2,
-                                                  tr.n_active2, tr.committed2; stream=tr.stream)
+                        reservoir_launch!(tr.box1, tr.n_active1, tr.committed1, half, want1)
                     end
                 end
             end
-            CUDA.synchronize()
 
             for (fi, tr) in enumerate(triples)
-                # [delta, n_accepted, try_t, acc_t, try_r, acc_r] this sub-batch
-                hmc1 = Array(tr.box1.mc_result)
-                hmc2 = Array(tr.box2.mc_result)
+                hmc1 = hmcs[fi]
+                _, hins, hres = wait_box(tr.box1; ins = did_transfer[fi], res = did_res1[fi])
                 tr.e1 += hmc1[1]; tr.n_accepted1 += round(Int, hmc1[2]); tr.n_moves1 += disp_per_box
-                tr.e2 += hmc2[1]; tr.n_accepted2 += round(Int, hmc2[2]); tr.n_moves2 += disp_per_box
-                for (t, h) in ((tr.tune1, hmc1), (tr.tune2, hmc2))
-                    t.ntry  += round(Int, h[3]); t.nacc  += round(Int, h[4])
-                    t.nrtry += round(Int, h[5]); t.nracc += round(Int, h[6])
-                end
+                tr.n_moves2 += disp_per_box
+                t = tr.tune1
+                t.ntry  += round(Int, hmc1[3]); t.nacc  += round(Int, hmc1[4])
+                t.nrtry += round(Int, hmc1[5]); t.nracc += round(Int, hmc1[6])
 
                 if did_transfer[fi]
-                    h = Array(tr.transfer_result)
-                    tr.e1 += h[1]; tr.e2 += h[2]
-                    tr.n_transfer_attempts += round(Int, h[3]); tr.n_transfer_accepted += round(Int, h[4])
+                    tr.e1 += hins[1]; tr.e2 += hins[2]
+                    tr.n_transfer_attempts += round(Int, hins[3]); tr.n_transfer_accepted += round(Int, hins[4])
                     # n_active is unchanged by a same-box insertion
                 end
                 # reservoir result = [delta_e, n_accepted, n_active, type0_delta]
                 acc = 0
                 if did_res1[fi]
-                    hr = Array(tr.res_result1)
-                    tr.e1 += hr[1]; acc += round(Int, hr[2])
-                    tr.n_active1 = Int32(round(Int, hr[3])); tr.nta1 += round(Int32, hr[4])
-                end
-                if did_res2[fi]
-                    hr = Array(tr.res_result2)
-                    tr.e2 += hr[1]; acc += round(Int, hr[2])
-                    tr.n_active2 = Int32(round(Int, hr[3])); tr.nta2 += round(Int32, hr[4])
+                    tr.e1 += hres[1]; acc += round(Int, hres[2])
+                    tr.n_active1 = Int32(round(Int, hres[3])); tr.nta1 += round(Int32, hres[4])
                 end
                 if acc > 0
                     tr.deficit = max(0, tr.deficit - acc)
@@ -412,7 +345,7 @@ function main()
             ns_ios[fi] === nothing || flush(ns_ios[fi])
             if conf_ios1[fi] !== nothing && cycles_done >= next_conf[fi]
                 write_conf_frame(conf_ios1[fi], tr.box1, tr.n_active1, cycles_done, tr.e1, gridset.nbin)
-                write_conf_frame(conf_ios2[fi], tr.box2, tr.n_active2, cycles_done, tr.e2, gridset.nbin)
+                println(conf_ios2[fi], "# cycle=$cycles_done n=0 energy=", @sprintf("%.6f", tr.e2)); flush(conf_ios2[fi])
                 next_conf[fi] += conf_freq_cycles
             end
         end
@@ -427,13 +360,15 @@ function main()
     for b in 1:n_boxes, r in 1:n_replicas
         fi = (b - 1) * n_replicas + r
         tr = triples[fi]
-        n1 = save_particles(trajpaths1[fi], tr.box1, tr.n_active1, gridset.nbin, tr.e1, tr.tune1.js, tr.tune1.rs)
-        n2 = save_particles(trajpaths2[fi], tr.box2, tr.n_active2, gridset.nbin, tr.e2, tr.tune2.js, tr.tune2.rs)
+        pos, bins, _, ptype = box_get(tr.box1, tr.n_active1)
+        n1 = save_particles(trajpaths1[fi], pos, bins, ptype, tr.n_active1, gridset.nbin, tr.e1, tr.tune1.js, tr.tune1.rs)
+        n2 = save_particles(trajpaths2[fi], Float64[], Float64[], Int32[], 0, gridset.nbin, tr.e2, tr.tune2.js, tr.tune2.rs)
         log_final!(logios[fi], tr, total_time, n_cycles, trajpaths1[fi], trajpaths2[fi])
         for io in (ns_ios[fi], conf_ios1[fi], conf_ios2[fi])
             io === nothing || close(io)
         end
         println("[L=$(box_strs[b]) T=$(labels[r])] saved N1=$n1 N2=$n2")
+        close_box(tr.box1)
     end
     println("Done.")
 end

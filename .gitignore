@@ -1,3 +1,4 @@
 work_*/
 examples/*/work_*/
 *.tar.gz
+native/*.so

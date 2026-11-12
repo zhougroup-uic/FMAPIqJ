@@ -1,4 +1,4 @@
-# cli.jl - command lines of the python tools: fmappre, fmap (grid generation), fmap_pack_zlib.
+# cli.jl - command lines of the python tools: fmappre, fmap (grid generation).
 
 function main_fmappre(argv::Vector{String})
     out = nothing
@@ -27,11 +27,11 @@ function main_fmappre(argv::Vector{String})
     return 0
 end
 
-"fmap subA.vdw parms.txt ang.dat [fnamepat] [subB.vdw]: one gzip'd tErn grid per orientation."
+"fmap subA.vdw parms.txt ang.dat [subB.vdw] [--sp2p PREFIX]: the energy maps as PREFIX.ve.sp2p (default prefix fmap)."
 function main_fmap(argv::Vector{String})
-    # --zlib PREFIX: write PREFIX.ve.zlib directly (no ve/ directory, no fmap_pack_zlib)
+    # --sp2p PREFIX: write PREFIX.ve.sp2p (spatially compressed, SPT=2p) directly (no ve/ directory)
     zprefix = nothing
-    if (k = findfirst(==("--zlib"), argv)) !== nothing && k < length(argv)
+    if (k = findfirst(==("--sp2p"), argv)) !== nothing && k < length(argv)
         zprefix = argv[k+1]
         argv = [argv[i] for i in eachindex(argv) if i != k && i != k + 1]
     end
@@ -46,15 +46,13 @@ function main_fmap(argv::Vector{String})
         argv = [argv[i] for i in eachindex(argv) if i != k && i != k + 1]
     end
     (posefile === nothing) == (ecut === nothing) || (println(stderr, "--poses and --ecut go together"); return 1)
-    level = parse(Int, get(ENV, "FMAP_GZ_LEVEL", "1"))
     if length(argv) < 3
-        println(stderr, "Usage: fmap subA.vdw parms.txt ang.dat [fnamepat] [subB.vdw] [--zlib PREFIX]")
+        println(stderr, "Usage: fmap subA.vdw parms.txt ang.dat [subB.vdw] [--sp2p PREFIX] [--poses FILE --ecut E]")
         return 1
     end
     subA, parms_file, ang_file = argv[1], argv[2], argv[3]
-    fnamepat = length(argv) < 4 ? "ve/tErn.{:05d}.mat.gz" : argv[4]
-    subB = length(argv) > 4 ? argv[5] : nothing
-    occursin("{:05d}", fnamepat) || (println(stderr, "Invalid filename pattern: $fnamepat"); return 1)
+    subB = length(argv) > 3 ? argv[4] : nothing
+    zprefix === nothing && posefile === nothing && (zprefix = "fmap")
 
     params = read_parameters(parms_file)
     local kbt, kappa, sdie, rscl, qscl, escl, vscl, rcut, dx, blen
@@ -75,10 +73,6 @@ function main_fmap(argv::Vector{String})
     crds = scale_coordinates(crds, dx); pros = scale_coordinates(pros, dx)
     angles = read_angles(ang_file)
     @printf(stderr, "Loaded: %d crds, %d pros, %d rotations\n", length(crds), length(pros), length(angles))
-    if zprefix === nothing && posefile === nothing
-        d = dirname(fnamepat)
-        isempty(d) || mkpath(d)
-    end
     pio = nothing
     if posefile !== nothing
         pio = open(posefile, "w")
@@ -87,9 +81,9 @@ function main_fmap(argv::Vector{String})
 
     ctx = if get(ENV, "FMAPB2_GPU", "0") in ("", "0")
         SoftCtx(blen)
-    else            # CUDA.jl + CUFFT (gpu/gpu.jl), same softgrd contract
-        Base.include(FmapGen, joinpath(@__DIR__, "..", "gpu", "gpu.jl"))
-        Base.invokelatest(make_ctx, blen, Val(true))
+    else            # native/libfmapgrid.so (CUDA C + cuFFT through ccall, gpu/native.jl), same softgrd contract
+        Base.include(FmapGen, joinpath(@__DIR__, "..", "gpu", "native.jl"))
+        Base.invokelatest(make_native_ctx, blen)
     end
     println(stderr, "Processing orientations...(check output file for progress)")
     if zprefix === nothing && posefile !== nothing
@@ -100,30 +94,8 @@ function main_fmap(argv::Vector{String})
             npose += Base.invokelatest(select_poses, pio, ctx, ang, ecut)
         end
         @printf(stderr, "poses below %.3f kcal/mol: %d\n", ecut, npose)
-    elseif zprefix === nothing
-        # per-orientation gzip files; compression of one orientation overlaps the next one's computation
-        slots = Channel{Nothing}(max(1, Threads.nthreads() - 1))
-        tasks = Task[]
-        for (i, ang) in enumerate(angles)
-            rotated = rotate_atoms(pros, euler_to_rotmat(ang[1], ang[2], ang[3]))
-            grid = Base.invokelatest(softgrd, ctx, crds, rotated, dx, sol)
-            fname = replace(fnamepat, "{:05d}" => @sprintf("%05d", i - 1))
-            put!(slots, nothing)
-            push!(tasks, Threads.@spawn begin
-                try
-                    open(fname, "w") do io
-                        s = GzipCompressorStream(io; level)
-                        write(s, grid)
-                        close(s)
-                    end
-                finally
-                    take!(slots)
-                end
-            end)
-        end
-        foreach(wait, tasks)
     else
-        write_ve_zlib(zprefix, parms_file, angles, level) do i
+        write_ve_sp2p(zprefix, parms_file, angles) do i
             ang = angles[i]
             rotated = rotate_atoms(pros, euler_to_rotmat(ang[1], ang[2], ang[3]))
             g = Base.invokelatest(softgrd, ctx, crds, rotated, dx, sol)
@@ -134,27 +106,6 @@ function main_fmap(argv::Vector{String})
     pio === nothing || close(pio)
     println()
     println(stderr, "Completed successfully!")
-    return 0
-end
-
-function main_pack(argv::Vector{String})
-    if isempty(argv) || argv[1] in ("-h", "--help")
-        println("Usage: fmap_pack_zlib <config.txt> [output_prefix] [--level N]")
-        println("  output_prefix  default: 'fmap'  -> fmap.ve.zlib")
-        return 0
-    end
-    prefix = "fmap"; level = 1
-    i = 2
-    while i <= length(argv)
-        if argv[i] == "--level" && i < length(argv)
-            level = parse(Int, argv[i+1]); i += 2
-        elseif !startswith(argv[i], "--")
-            prefix = argv[i]; i += 1
-        else
-            println("Unknown option: ", argv[i]); return 1
-        end
-    end
-    pack(argv[1], prefix; level)
     return 0
 end
 
@@ -178,7 +129,7 @@ function main_fmapdd(argv::Vector{String})
     rec = center(read_vdw(poses.rec), poses.rcen)
     lig = center(read_vdw(poses.lig), poses.lcen)
     gpu = !(get(ENV, "FMAPB2_GPU", "0") in ("", "0"))
-    gpu && Base.include(FmapGen, joinpath(@__DIR__, "..", "gpu", "gpu.jl"))      # CUDA device
+    gpu && Base.include(FmapGen, joinpath(@__DIR__, "..", "gpu", "native.jl"))      # libfmapgrid.so
     t = @elapsed res = if gpu
         f = Base.invokelatest(getglobal, FmapGen, :pair_energies_gpu)
         Base.invokelatest(f, rec, lig, poses, ps; atm)

@@ -240,11 +240,11 @@ end
 
 "The ern statistic column (3rd field) of the lines of `ern_type`, shuffled as python does."
 function process_ern_data(ern_type::AbstractString, ern_file)
-    files = ern_file === nothing ? ["fmap.ern", "fmap.ern.gz"] : [ern_file]
+    files = ern_file === nothing ? ["fmap.ern"] : [ern_file]
     data = Float64[]
     for fname in files
         isfile(fname) || continue
-        io = endswith(fname, ".gz") ? GzipDecompressorStream(open(fname)) : open(fname)
+        io = open(fname)
         for line in eachline(io)
             if occursin(ern_type, line)
                 parts = split(line)
@@ -336,54 +336,26 @@ end
 
 GetkBT(tempK) = (N_A = 6.022045000e+23; k_B = 3.297623030e-24; N_A * k_B * tempK / 1000.0)
 
-"Histogram (256 bins, int8 value + 128) of one gzip'd tErn grid, with the combined elec+vdw value for 2-byte cells."
-function ve_histogram(fname::AbstractString, blen::Int, tern::Int)
-    data = open(io -> read(GzipDecompressorStream(io)), fname)
-    length(data) == blen^3 * tern || error("$fname: expected $(blen^3 * tern) bytes, got $(length(data))")
-    hist = zeros(Int, 256)
-    if tern == 1
-        @inbounds for b in data
-            hist[Int(reinterpret(Int8, b))+129] += 1
-        end
-    else
-        @inbounds for c in 1:blen^3
-            e0 = Int(reinterpret(Int8, data[2c-1])); e1 = Int(reinterpret(Int8, data[2c]))
-            v = (e0 == 127 || e1 == 127) ? 127 : clamp(e0 + e1, -128, 127)
-            hist[v+129] += 1
-        end
-    end
-    return hist
-end
+"""
+    run_stats_ve(; ve_path, ...)
 
-function run_stats_ve(; nrot = nothing, scl_file = nothing, ve_path::String = "ve", parms_file::String = "parms.txt")
+Excluded-volume / second-virial statistics of an energy grid (`fmap.ve.sp2p`), from a histogram of the grid values of every rotation
+that is counted on the compressed units (`Spt.rotation_histogram`): the grid is never decoded.
+"""
+function run_stats_ve(; nrot = nothing, scl_file = nothing, ve_path::String = "fmap.ve.sp2p", parms_file::String = "parms.txt")
     parms = read_stat_parms(parms_file)
-    if !haskey(parms, "mass") || !haskey(parms, "blen")
-        println("Error: mass and blen required in $parms_file"); return
-    end
-    if nrot === nothing
-        haskey(parms, "nrot") || (println("Error: nrot must be provided via --nrot or defined in $parms_file"); return)
-        nrot = Int(parms["nrot"])
-    elseif !haskey(parms, "nrot")
-        open(parms_file, "a") do f
-            write(f, "nrot         : $nrot\n")
-        end
-    end
-    mass = parms["mass"]; blen = Int(parms["blen"])
+    haskey(parms, "mass") || (println("Error: mass required in $parms_file"); return)
+    mass = parms["mass"]
     conv = 6.022140857e+23 / 1e+27 / (mass^2) * 1000 * 10000
-    dx = get(parms, "spacing", 0.6)
-    tern = tern_bytes_from_env()
+    f = Spt.read_sp2p(ve_path)
+    blen = f.blen; dx = f.spacing
+    nrot = f.nrot
     tern_scl = 8.0
     hist_combined = zeros(Int, 256)
     histograms = Vector{Int}[]
     for i in 0:nrot-1
-        fname = @sprintf("%s/tErn.%05d.mat.gz", ve_path, i)
-        isfile(fname) || continue
-        try
-            h = ve_histogram(fname, blen, tern)
-            push!(histograms, h); hist_combined .+= h
-        catch
-            continue
-        end
+        h = Spt.rotation_histogram(f, i)
+        push!(histograms, h); hist_combined .+= h
     end
     if isempty(histograms) || sum(hist_combined) == 0
         println("No ve data found"); return
@@ -450,67 +422,11 @@ function run_stats_ve(; nrot = nothing, scl_file = nothing, ve_path::String = "v
     return nothing
 end
 
-function run_stats_mat(; nrot = nothing, mat_file = nothing, scl_file = nothing, parms_file::String = "parms.txt")
-    parms = read_stat_parms(parms_file)
-    if !haskey(parms, "mass") || !haskey(parms, "blen")
-        println("Error: mass and blen required in $parms_file"); return
-    end
-    if nrot === nothing
-        haskey(parms, "nrot") || (println("Error: nrot must be provided via --nrot or defined in $parms_file"); return)
-        nrot = Int(parms["nrot"])
-    elseif !haskey(parms, "nrot")
-        open(parms_file, "a") do f
-            write(f, "nrot         : $nrot\n")
-        end
-    end
-    mass = parms["mass"]; blen = Int(parms["blen"])
-    conv = 6.022140857e+23 / 1e+27 / (mass^2) * 1000 * 10000
-    dx = get(parms, "spacing", 0.6)
-    nbin = 4001; lowb = -40.0; dxbin = 0.02
-    fname = mat_file !== nothing ? mat_file : isfile("mat.bin.gz") ? "mat.bin.gz" : isfile("mat.bin") ? "mat.bin" : nothing
-    fname === nothing && (println("Error: mat.bin.gz or mat.bin not found"); return)
-    isfile(fname) || (println("Error: $fname not found"); return)
-    raw = endswith(fname, ".gz") ? open(io -> read(GzipDecompressorStream(io)), fname) : read(fname)
-    mat = reshape(reinterpret(Float64, raw), nbin, nbin)'      # numpy (nbin, nbin) row-major
-    if scl_file !== nothing
-        fp = scl_file == "-" ? stdin : open(scl_file)
-        for line in eachline(fp)
-            parts = split(line)
-            length(parts) < 3 && continue
-            escl = parse(Float64, parts[1]); vscl = parse(Float64, parts[2]); tempk = parse(Float64, parts[3]) + 273.15
-            kbt = GetkBT(tempk)
-            vol = 0.0
-            for ei in 0:nbin-1, vi in 0:nbin-1
-                if mat[ei+1, vi+1] > 0.5
-                    vol += exp(((dxbin * ei + lowb) * escl + (dxbin * vi + lowb) * vscl) / -kbt) * mat[ei+1, vi+1] / nrot
-                end
-            end
-            @printf("%8.3f %8.3f %8.2f %16.3f\n", escl, vscl, tempk, 0.5 * ((blen^3 - vol) * conv * libm_pow(dx, 3.0)))
-        end
-        scl_file == "-" || close(fp)
-    else
-        kbt = get(parms, "kbt", 0.5924)
-        weighted = 0.0; total = 0.0
-        for ei in 0:nbin-1, vi in 0:nbin-1
-            if mat[ei+1, vi+1] > 0.5
-                weighted += exp(((dxbin * ei + lowb) + (dxbin * vi + lowb)) / -kbt) * mat[ei+1, vi+1] / nrot
-                total += mat[ei+1, vi+1]
-            end
-        end
-        open(parms_file, "a") do f
-            write(f, "MATv         :", @sprintf("%16.3f", (blen^3 - weighted) * libm_pow(dx, 3.0)), " angstrom^3\n")
-            write(f, "MATb22       :", @sprintf("%16.3f", 0.5 * ((blen^3 - weighted) * conv * libm_pow(dx, 3.0))), " x 10^-4 mL mol / g^2\n")
-            write(f, "MATb20       :", @sprintf("%16.3f", 0.5 * (blen^3 - total / nrot) * conv * libm_pow(dx, 3.0)), " x 10^-4 mL mol / g^2\n")
-        end
-    end
-    return nothing
-end
-
 """
     main_fmapstat(args)
 
 fmapstat <datafile> <col>                      FP standard error of one column
-fmapstat stats [--ern [FILE] | --ve PATH | --mat [FILE]] [--nrot N] [--scl FILE] [--parm FILE]
+fmapstat stats [--ern [FILE] | --ve fmap.ve.sp2p] [--scl FILE] [--parm FILE]
 """
 function main_fmapstat(argv::Vector{String})
     if length(argv) >= 2 && argv[1] != "stats"
@@ -526,11 +442,11 @@ function main_fmapstat(argv::Vector{String})
         end
     end
     if isempty(argv) || argv[1] != "stats"
-        println("Usage: fmapstat stats [--ern [FILE] | --ve PATH | --mat [FILE]] [--nrot N] [--scl FILE] [--parm FILE]")
+        println("Usage: fmapstat stats [--ern [FILE] | --ve fmap.ve.sp2p] [--scl FILE] [--parm FILE]")
         println("       fmapstat <datafile> <col>")
         return 0
     end
-    ern = nothing; ve = nothing; mat = nothing; nrot = nothing; scl = nothing; parm = "parms.txt"
+    ern = nothing; ve = nothing; nrot = nothing; scl = nothing; parm = "parms.txt"
     modes = 0
     i = 2
     optarg(i) = (i + 1 <= length(argv) && !startswith(argv[i+1], "--")) ? argv[i+1] : nothing
@@ -538,8 +454,6 @@ function main_fmapstat(argv::Vector{String})
         a = argv[i]
         if a == "--ern"
             modes += 1; ern = something(optarg(i), true); ern === true || (i += 1)
-        elseif a == "--mat"
-            modes += 1; mat = something(optarg(i), true); mat === true || (i += 1)
         elseif a == "--ve"
             modes += 1; ve = argv[i+1]; i += 1
         elseif a == "--nrot"
@@ -554,12 +468,9 @@ function main_fmapstat(argv::Vector{String})
         i += 1
     end
     if modes > 1
-        println("Error: Please specify only one of --ern, --ve, or --mat"); return 1
+        println("Error: Please specify only one of --ern or --ve"); return 1
     elseif ve !== nothing
-        endswith(ve, ".zip") && (println("Error: .zip input is not supported by the Julia fmapstat"); return 1)
         run_stats_ve(; nrot, scl_file = scl, ve_path = ve, parms_file = parm)
-    elseif mat !== nothing
-        run_stats_mat(; nrot, mat_file = mat === true ? nothing : mat, scl_file = scl, parms_file = parm)
     else
         run_stats(; parms_file = parm, ern_file = ern === nothing || ern === true ? nothing : ern)
     end

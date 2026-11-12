@@ -6,8 +6,7 @@
 set -e
 source "$(dirname "$0")/../common.sh"
 W=${1:-$PWD/work_n800}
-rm -rf "$W"; mkdir -p "$W/cache"; cd "$W"
-export FMAPIQ_CACHE=$W/cache
+rm -rf "$W"; mkdir -p "$W"; cd "$W"
 cp "$ROOT/examples/cenA.pqr" subA.pqr
 time julia --project="$ROOT" "$ROOT/bin/fmapiq.jl" subA.pqr --work-dir run $GPUFLAG --threads $THREADS --sim-threads 2 \
      --n-reps ${NREPS:-64} --n-cycles ${NCYCLES:-20000} --ion 0.016 --temp 25 --vscl 0.16 \

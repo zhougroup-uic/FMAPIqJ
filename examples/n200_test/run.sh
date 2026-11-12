@@ -8,8 +8,7 @@ set -e
 source "$(dirname "$0")/../common.sh"
 if [ "$MODE" = gpu ]; then NREPS=${NREPS:-64}; else NREPS=${NREPS:-3}; fi
 W=${1:-$PWD/work_n200}
-rm -rf "$W"; mkdir -p "$W/cache"; cd "$W"
-export FMAPIQ_CACHE=$W/cache
+rm -rf "$W"; mkdir -p "$W"; cd "$W"
 cp "$ROOT/examples/cenA.pqr" subA.pqr
 time julia --project="$ROOT" "$ROOT/bin/fmapiq.jl" subA.pqr --work-dir run $GPUFLAG --threads $THREADS --sim-threads 2 \
      --n-reps $NREPS --n-cycles ${NCYCLES:-20000} --ion 0.016 --temp 25 --vscl 0.16 \

@@ -1,6 +1,6 @@
 #!/bin/bash
-# GPU sim2iq (CUDA.jl) against the C reference output test/data/sim2iq.dat; expect max rel diff ~1e-7.
-# Requirements: julia >= 1.9, NVIDIA GPU + driver (CUDA.jl fetches its own toolkit), ~4 CPU cores.
+# GPU sim2iq (native/libfmapsim2iq.so, build: module load CUDA && make -C native) against the C reference output test/data/sim2iq.dat; expect max rel diff ~1e-7.
+# Requirements: julia >= 1.9, NVIDIA GPU + driver, libfmapsim2iq.so, ~4 CPU cores.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 D=$ROOT/test/data
