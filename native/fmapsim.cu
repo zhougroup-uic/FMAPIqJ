@@ -16,7 +16,7 @@ static int fail(const char *what, const char *msg) { snprintf(g_err, sizeof g_er
 
 struct fsim_tab {
     fmap_tab h;                        // pointers are device pointers
-    int16_t *d_aidx, *d_amap; double *d_rotm;
+    int16_t *d_aidx, *d_amap; double *d_rotm; float *d_rotm_f;
     std::vector<int16_t> aidx;         // host copy (rotation index of orientations on the host)
     int8_t *d_sp[FMAP_MAX_CTX];
     double scl;
@@ -63,8 +63,8 @@ __device__ double sum_pair_energy(const fmap_tab &t, const BoxArgs &b, fmap_v3 p
         fmap_v3 pj = ld3(b.pos, j);
         int rj = b.ridx[j], tj = b.ptype[j];
         int ctx = fmap_ctx_index(self_type, tj, t.n_types);
-        if (j < self_idx) val += fmap_pair_energy(&t, ctx, pj, rj, point, rot, b.box, b.es, b.vs);
-        else              val += fmap_pair_energy(&t, ctx, point, rot, pj, rj, b.box, b.es, b.vs);
+        if (j < self_idx) val += fmap_pair_energy_f_pbc(&t, ctx, pj, rj, point, rot, b.box, b.es, b.vs);
+        else              val += fmap_pair_energy_f_pbc(&t, ctx, point, rot, pj, rj, b.box, b.es, b.vs);
     }
     return block_sum(val, sdata, tid);
 }
@@ -73,18 +73,32 @@ __device__ double sum_pair_energy(const fmap_tab &t, const BoxArgs &b, fmap_v3 p
 __device__ double sum_pair_energy_diff(const fmap_tab &t, const BoxArgs &b, fmap_v3 trial, int trial_rot, fmap_v3 cur, int cur_rot, int self_idx,
                                        int self_type, int n, double *sdata, int tid) {
     double val = 0.0;
+    const bool same_pos = trial.x == cur.x && trial.y == cur.y && trial.z == cur.z;      // rotation move: one minimum image serves both
     for (int j = tid; j < n; j += 256) {
         if (j == self_idx) continue;
         fmap_v3 pj = ld3(b.pos, j);
         int rj = b.ridx[j], tj = b.ptype[j];
         int ctx = fmap_ctx_index(self_type, tj, t.n_types);
+        const bool first = j < self_idx;                      // pj is the first molecule of the pair
+        // minimum-image separation (first - second) of the trial and of the current position
+        fmap_v3 q = trial;
+        double nx = first ? fmap_pbc(pj.x - q.x, b.box.x) : fmap_pbc(q.x - pj.x, b.box.x);
+        double ny = first ? fmap_pbc(pj.y - q.y, b.box.y) : fmap_pbc(q.y - pj.y, b.box.y);
+        double nz = first ? fmap_pbc(pj.z - q.z, b.box.z) : fmap_pbc(q.z - pj.z, b.box.z);
+        double ox = nx, oy = ny, oz = nz;
+        if (!same_pos) {
+            q = cur;
+            ox = first ? fmap_pbc(pj.x - q.x, b.box.x) : fmap_pbc(q.x - pj.x, b.box.x);
+            oy = first ? fmap_pbc(pj.y - q.y, b.box.y) : fmap_pbc(q.y - pj.y, b.box.y);
+            oz = first ? fmap_pbc(pj.z - q.z, b.box.z) : fmap_pbc(q.z - pj.z, b.box.z);
+        }
         double e_new, e_old;
-        if (j < self_idx) {
-            e_new = fmap_pair_energy(&t, ctx, pj, rj, trial, trial_rot, b.box, b.es, b.vs);
-            e_old = fmap_pair_energy(&t, ctx, pj, rj, cur, cur_rot, b.box, b.es, b.vs);
+        if (first) {
+            e_new = fmap_pair_energy_f(&t, ctx, nx, ny, nz, rj, trial_rot, b.es, b.vs);
+            e_old = fmap_pair_energy_f(&t, ctx, ox, oy, oz, rj, cur_rot, b.es, b.vs);
         } else {
-            e_new = fmap_pair_energy(&t, ctx, trial, trial_rot, pj, rj, b.box, b.es, b.vs);
-            e_old = fmap_pair_energy(&t, ctx, cur, cur_rot, pj, rj, b.box, b.es, b.vs);
+            e_new = fmap_pair_energy_f(&t, ctx, nx, ny, nz, trial_rot, rj, b.es, b.vs);
+            e_old = fmap_pair_energy_f(&t, ctx, ox, oy, oz, cur_rot, rj, b.es, b.vs);
         }
         val += e_new - e_old;
     }
@@ -98,7 +112,7 @@ __device__ double sum_pair_energy_excl(const fmap_tab &t, const BoxArgs &b, fmap
         if (j == skip) continue;
         fmap_v3 pj = ld3(b.pos, j);
         int ctx = fmap_ctx_index(self_type, b.ptype[j], t.n_types);
-        val += fmap_pair_energy(&t, ctx, pj, b.ridx[j], point, rot, b.box, b.es, b.vs);
+        val += fmap_pair_energy_f_pbc(&t, ctx, pj, b.ridx[j], point, rot, b.box, b.es, b.vs);
     }
     return block_sum(val, sdata, tid);
 }
@@ -397,7 +411,7 @@ __global__ void sp1_fill_kernel(int8_t *sp, const int8_t *w2p, const int *blkof,
 }
 
 // returns 0 and sets *sp (device) and the grid parameters
-static int load_sp2p(const char *path, int nrot_expect, int tern_expect, int8_t **sp, int *blen, double *spacing) {
+static int load_sp2p(const char *path, int nrot_expect, int spt, int8_t **sp, int *blen, double *spacing, int *tern_out) {
     FILE *f = fopen(path, "rb");
     if (!f) return fail("fsim_tab_open", path);
     uint8_t h[48];
@@ -407,11 +421,13 @@ static int load_sp2p(const char *path, int nrot_expect, int tern_expect, int8_t 
     if (tern == 0) tern = 2;
     if (mode != 34) { fclose(f); return fail("fsim_tab_open", "only the per-rotation sparse table (SPT=2p) is supported"); }
     if (nrot != nrot_expect) { fclose(f); return fail("fsim_tab_open", "nrot of the grid differs from the rotation tables"); }
-    if ((int)tern != tern_expect) { fclose(f); return fail("fsim_tab_open", "cell format of the grid differs from tern"); }
+    if (tern != 1 && tern != 2) { fclose(f); return fail("fsim_tab_open", "unknown cell format in the grid file"); }
+    *tern_out = (int)tern;
     std::vector<uint8_t> blob(nbytes);
     if (fread(blob.data(), 1, nbytes, f) != nbytes) { fclose(f); return fail("fsim_tab_open", "truncated grid file"); }
     fclose(f);
-    int8_t *w2p; CK(cudaMalloc(&w2p, nbytes)); CK(cudaMemcpy(w2p, blob.data(), nbytes, cudaMemcpyHostToDevice));
+    int8_t *w2p; CK(cudaMalloc(&w2p, nbytes + 16)); CK(cudaMemset(w2p, 0, nbytes + 16)); CK(cudaMemcpy(w2p, blob.data(), nbytes, cudaMemcpyHostToDevice));
+    if (spt == 2) { *sp = w2p; *blen = bl; *spacing = sp_; return 0; }     // SPT=2p: the blob itself is the table (padded by 16 bytes)
     long long nb = (bl + 3) / 4, nblk = nb * nb * nb; int mapb = (nrot + 3) >> 2;
     long long sp_map = 16 + 4 * nblk, sp_data = (sp_map + (long long)mapb * nblk + 15) / 16 * 16;
     uint8_t *cls; int *stored;
@@ -453,9 +469,9 @@ const char *fsim_error(void) { return g_err; }
 int fsim_device_count(void) { int n = 0; return cudaGetDeviceCount(&n) == cudaSuccess ? n : 0; }
 
 fsim_tab *fsim_tab_open(int device, int n_types, int nrot, int nbin, const int16_t *aidx, const int16_t *amap, const double *rotm,
-                        int n_ctx, const char *const *paths, int tern) {
+                        int n_ctx, const char *const *paths, int spt, int use_float) {
+    if (spt != 1 && spt != 2) { fail("fsim_tab_open", "spt must be 1 or 2"); return NULL; }
     if (n_types < 1 || n_types > 5 || n_ctx != n_types * (n_types + 1) / 2) { fail("fsim_tab_open", "n_ctx must be n_types*(n_types+1)/2, n_types <= 5"); return NULL; }
-    if (tern != 1 && tern != 2) { fail("fsim_tab_open", "tern must be 1 or 2"); return NULL; }
     CKN(cudaSetDevice(device));
     fsim_tab *t = new fsim_tab();
     memset(&t->h, 0, sizeof t->h);
@@ -464,12 +480,20 @@ fsim_tab *fsim_tab_open(int device, int n_types, int nrot, int nbin, const int16
     CKN(cudaMalloc(&t->d_aidx, (size_t)nbin * nbin * nbin * 2)); CKN(cudaMemcpy(t->d_aidx, aidx, (size_t)nbin * nbin * nbin * 2, cudaMemcpyHostToDevice));
     CKN(cudaMalloc(&t->d_amap, (size_t)nrot * nrot * 2)); CKN(cudaMemcpy(t->d_amap, amap, (size_t)nrot * nrot * 2, cudaMemcpyHostToDevice));
     CKN(cudaMalloc(&t->d_rotm, (size_t)nrot * 9 * 8)); CKN(cudaMemcpy(t->d_rotm, rotm, (size_t)nrot * 9 * 8, cudaMemcpyHostToDevice));
-    t->h.n_types = n_types; t->h.n_ctx = n_ctx; t->h.nrot = nrot; t->h.nbin = nbin; t->h.tern = tern;
+    t->h.spt = spt; t->d_rotm_f = NULL;
+    if (use_float) {
+        std::vector<float> rf((size_t)nrot * 9); for (size_t i = 0; i < rf.size(); i++) rf[i] = (float)rotm[i];
+        CKN(cudaMalloc(&t->d_rotm_f, rf.size() * 4)); CKN(cudaMemcpy(t->d_rotm_f, rf.data(), rf.size() * 4, cudaMemcpyHostToDevice));
+        t->h.rotm_f = t->d_rotm_f;
+    }
+    t->h.n_types = n_types; t->h.n_ctx = n_ctx; t->h.nrot = nrot; t->h.nbin = nbin;
     t->h.aidx = t->d_aidx; t->h.amap = t->d_amap; t->h.rotm = t->d_rotm;
     double spacing0 = 0.0;
     for (int c = 0; c < n_ctx; c++) {
-        int blen; double spacing;
-        if (load_sp2p(paths[c], nrot, tern, &t->d_sp[c], &blen, &spacing)) return NULL;
+        int blen, ct; double spacing;
+        if (load_sp2p(paths[c], nrot, spt, &t->d_sp[c], &blen, &spacing, &ct)) return NULL;
+        if (c == 0) t->h.tern = ct;
+        else if (ct != t->h.tern) { fail("fsim_tab_open", "cell format differs between contexts"); return NULL; }
         if (c == 0) spacing0 = spacing;
         else if (spacing != spacing0) { fail("fsim_tab_open", "grid spacing differs between contexts"); return NULL; }
         t->h.sp[c] = t->d_sp[c]; t->h.blen[c] = blen;
@@ -481,11 +505,12 @@ fsim_tab *fsim_tab_open(int device, int n_types, int nrot, int nbin, const int16
 
 void fsim_tab_close(fsim_tab *t) {
     if (!t) return;
-    cudaFree(t->d_aidx); cudaFree(t->d_amap); cudaFree(t->d_rotm);
+    cudaFree(t->d_aidx); cudaFree(t->d_amap); cudaFree(t->d_rotm); if (t->d_rotm_f) cudaFree(t->d_rotm_f);
     for (int c = 0; c < t->h.n_ctx; c++) cudaFree(t->d_sp[c]);
     delete t;
 }
 double fsim_tab_scl(const fsim_tab *t) { return t->scl; }
+int fsim_tab_tern(const fsim_tab *t) { return t->h.tern; }
 int fsim_tab_blen(const fsim_tab *t, int ctx) { return t->h.blen[ctx]; }
 int fsim_rot_index(const fsim_tab *t, double b1, double b2, double b3) {
     fmap_tab h = t->h; h.aidx = t->aidx.data();

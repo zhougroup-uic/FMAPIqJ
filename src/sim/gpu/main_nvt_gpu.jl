@@ -15,7 +15,7 @@
 #   TE_list entries: T[:elec_scale[:vdw_scale[:label]]] (scales default 1.0); one replica per entry.
 #   Defaults: max_trans/max_rot/zratio 1, transfer_freq 0.1, target_ratio 0.3, n_types 1,
 #   ns_freq/conf_freq 0 (disabled), adjust_cycles 10 (0 = frozen step sizes). v1 is ignored (one box).
-# Requires TERN_BYTES to match the grid (1 = summed channel, the pipeline default; 2 = [elec, vdw]).
+# The grid cell format (1 = summed channel, the pipeline default; 2 = [elec, vdw]) is read from the fmap.ve.sp2p files.
 using Printf
 include("../rotsys.jl")           # rotation tables from rot.eul (plain pair table), Rotij
 include("nvt_native.jl")          # libfmapsim.so: tables, boxes and moves on the GPU, host-side helpers
@@ -44,9 +44,6 @@ function main()
     box_strs   = split(ARGS[2], ",")
     box_list   = [parse(Float64, x) for x in box_strs]
     temps, escls, vscls, labels = parse_te_list(ARGS[3])
-    if TERN_BYTES == 1 && (any(!=(1.0), escls) || any(!=(1.0), vscls))
-        @warn "elec_scale/vdw_scale requested but NOT applied: 1-byte tErn build (TERN_BYTES=1) has no separate channels; running as if both are 1.0"
-    end
     n_cycles      = parse(Int, ARGS[4])
     seed          = parse(UInt64, ARGS[5])
     start_arg     = ARGS[6]
@@ -83,6 +80,9 @@ function main()
     println("Loading grid contexts from $fmap_paths (n_types=$n_types) ..."); flush(stdout)
     gridset = load_fmap_paths_native(fmap_paths, n_types)
     n_ctx = n_types * (n_types + 1) ÷ 2
+    if gridset.tern == 1 && (any(!=(1.0), escls) || any(!=(1.0), vscls))
+        @warn "elec_scale/vdw_scale requested but NOT applied: the grid has a single summed channel (cell format 1); running as if both are 1.0"
+    end
     println("Grid loaded: nrot=$(gridset.nrot) nbin=$(gridset.nbin) n_ctx=$n_ctx blens=$(gridset.blens)"); flush(stdout)
 
     # type_counts_total is totals across BOTH boxes (matches

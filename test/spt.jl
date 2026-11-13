@@ -57,6 +57,12 @@ end
                 ok &= e0 == w0 && (tern == 1 || e1 == w1)
             end
             @test ok
+            w2 = sp2p_blob(f)                                         # SPT=2p read in place gives the same cells
+            ok2 = true
+            for r in 0:nrot-1, i in 0:B-1, j in 0:B-1, k in 0:B-1
+                ok2 &= sp2p_ve(w2, B, i, j, k, r) == sp1_ve(tbl, B, nrot, i, j, k, r)
+            end
+            @test ok2
             @test filesize(path) < 0.6 * nrot * tern * B^3 + 4096 || B < 25      # compresses once the grid is not tiny
         end
     end

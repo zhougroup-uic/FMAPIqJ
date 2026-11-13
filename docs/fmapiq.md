@@ -18,7 +18,7 @@ Same options and defaults as `pipeline.py` (`--n-proteins 200 --box-size 619.65 
 `TERN_BYTES` (default 1, pre-summed grid cells like the python pipeline),
 `FMAPIQ_ROOT` (location of `src/ data/`).
 
-Differences to `pipeline.py`: the simulation is the NVT engine of `src/sim` (no shared-memory server; every process builds its
-block-sparse lookup table from `fmap.ve.sp2p` itself, no dense grid or cache); the plot is an SVG; a work directory is reused when
+Differences to `pipeline.py`: the simulation is the NVT engine of `src/sim` (no shared-memory server; every process reads
+`fmap.ve.sp2p` itself (in place, or as a block-sparse lookup table with `FMAP_SPT=1`), no dense grid or cache); the plot is an SVG; a work directory is reused when
 `parms.txt`, `fmap.ern` and `fmap.ve.sp2p` exist (older `ve/` or `.zlib` grids are not read any more). `--pack` without `--skip-*` packs
 everything, as in the python CLI.

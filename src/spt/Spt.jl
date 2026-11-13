@@ -22,7 +22,7 @@ module Spt
 using Printf
 
 export Sp2pWriter, Sp2pFile, sp2p_open, sp2p_add!, sp2p_close!, read_sp2p, is_sp2p, read_sp2p_header,
-       compress_rotation, decode_rotation!, decode_all, unit_layout, sparse1_table, sp1_ve, rotation_histogram, SP_FILE_HDR, SP_PH
+       compress_rotation, decode_rotation!, decode_all, unit_layout, sparse1_table, sp1_ve, sp2p_blob, sp2p_ve, rotation_histogram, SP_FILE_HDR, SP_PH
 
 const SP_MAGIC = b"SPTV"
 const SP_FILE_HDR = 48
@@ -412,6 +412,57 @@ end
     mb = reinterpret(UInt8, @inbounds w[sp_map + blk * mapb + (a3 >> 2) + 1])
     c = (mb >> ((a3 & 3) << 1)) & 0x03
     return c == 0x00 ? (Int8(0), Int8(0)) : (Int8(127), Int8(127))
+end
+
+"""
+    sp2p_blob(f) -> Vector{Int8}
+
+The blob of a file as the in-place lookup `sp2p_ve` reads it (the layout the GPU engines use for SPT=2p), padded by 16 bytes.
+"""
+function sp2p_blob(f::Sp2pFile)
+    w = zeros(Int8, length(f.blob) + 16)
+    copyto!(w, 1, reinterpret(Int8, f.blob), 1, length(f.blob))
+    return w
+end
+
+@inline ld32(p::Ptr{UInt8}, off::Int) = unsafe_load(Ptr{UInt32}(p + off))
+@inline cnt_mixed(x::UInt32) = count_ones((x >> 1) & ~x & 0x55555555)
+
+"""
+    sp2p_ve(w, blen, i, j, k, a3) -> (elec, vdw)
+
+Cell (i, j, k) (0-based, inside the grid) of orientation a3 (0-based), read in place from the blob of a `.sp2p` file (`sp2p_blob`): the class bitmap of the
+4^3 blocks, then for a mixed block its rank among the mixed blocks and its palette slice. The same arithmetic as `fmap_sp2p_ve` in native/fmap_core.h.
+"""
+@inline function sp2p_ve(w::Vector{Int8}, blen::Int, i::Int, j::Int, k::Int, a3::Int)
+    GC.@preserve w begin
+        p = Ptr{UInt8}(pointer(w))
+        nb = (blen + 3) >> 2
+        blk = ((i >> 2) * nb + (j >> 2)) * nb + (k >> 2)
+        uh = SP_PH + 16 * a3
+        bm = Int(ld32(p, uh)); widx = blk >> 4; sh = (blk & 15) << 1
+        word = ld32(p, bm + 4 * widx)
+        c = (word >> sh) & 0x00000003
+        c == 0x00000000 && return (Int8(0), Int8(0))
+        c == 0x00000001 && return (Int8(127), Int8(127))
+        g = widx >> 2
+        r = Int(ld32(p, Int(ld32(p, uh + 4)) + 4 * g))
+        for q in (g << 2):(widx - 1)
+            r += cnt_mixed(ld32(p, bm + 4 * q))
+        end
+        r += cnt_mixed(word & ((UInt32(1) << sh) - 0x00000001))
+        off = Int(ld32(p, uh + 12)) + Int(ld32(p, Int(ld32(p, uh + 8)) + 4 * r))
+        nd = Int(unsafe_load(p + off)); idx = 0
+        if nd > 1
+            bits = 32 - leading_zeros(UInt32(nd - 1))
+            bp = (((i & 3) * 4 + (j & 3)) * 4 + (k & 3)) * bits
+            by = off + 1 + 2 * nd + (bp >> 3)
+            v = Int(unsafe_load(p + by)) | (Int(unsafe_load(p + by + 1)) << 8)
+            idx = (v >> (bp & 7)) & ((1 << bits) - 1)
+        end
+        pe = off + 1 + 2 * idx
+        return (reinterpret(Int8, unsafe_load(p + pe)), reinterpret(Int8, unsafe_load(p + pe + 1)))
+    end
 end
 
 end # module

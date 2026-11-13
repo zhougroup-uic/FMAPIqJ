@@ -27,5 +27,5 @@ fs2i_close(c);
 Checks: `julia --project=. test/native_grid.jl [blen] [norient]` (grid library against the CPU code), `bash test/test_sim2iq_gpu.sh`
 (I(q) against the C reference output, max relative difference about 1e-7).
 
-`fmap_core.h` is header-only host + device code (the rotation index of an orientation, the block-sparse table lookup, the pair energy) with no
+`fsim_tab_open` selects the table layout (`spt` 1: lookup table built on the device, fastest; 2: the sp2p blob in place, the Julia default: 7x less device memory for the N=200 grid, about 3% slower) and float lookup arithmetic; all combinations give the same energies. In `fmap_core.h`, `fmap_pair_energy` / `fmap_pair_energy_f` take the separation (rx, ry, rz) and do no periodic wrapping: the caller supplies the minimum image (`fmap_pbc`), or uses the `*_pbc` wrappers that take positions and the box. `fmap_core.h` is header-only host + device code (the rotation index of an orientation, the block-sparse table lookup, the pair energy) with no
 dependence on a framework, so a plugin engine (FEASST, hoomd) can include it and only has to provide the table arrays.

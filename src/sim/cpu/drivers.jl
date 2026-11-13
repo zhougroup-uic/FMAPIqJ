@@ -103,17 +103,16 @@ function main_nvt(argv::Vector{String})
         end
     end
 
-    tern = tern_bytes_from_env()
-    tern_check_scales(tern, elec_scale, vdw_scale)
     ctxs = FmapCtx[]
     for k in 1:n_ctx
         try
-            push!(ctxs, with_scales(fmap_create(rot_paths[k], ve_paths[k]; tern = tern), elec_scale, vdw_scale))
+            push!(ctxs, with_scales(fmap_create(rot_paths[k], ve_paths[k]), elec_scale, vdw_scale))
         catch e
             println(stderr, "Error: failed to load FMAP pair $(k-1): ", sprint(showerror, e)); return 1
         end
     end
 
+    tern_check_scales(ctxs[1].tern, elec_scale, vdw_scale)
     box = create_box(n_total, box_length, temperature, max_trans_param, max_rot_param, seed, ctxs, n_types,
                      zratio, target_ratio)
     if start_file == "-"

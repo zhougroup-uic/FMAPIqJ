@@ -22,8 +22,6 @@ end
 fsim_error() = unsafe_string(ccall(fsim_sym(:fsim_error), Cstring, ()))
 fsim_check(rc::Integer) = rc < 0 ? error("libfmapsim: ", fsim_error()) : rc
 
-const TERN_BYTES = parse(Int, get(ENV, "TERN_BYTES", "2"))
-TERN_BYTES in (1, 2) || error("TERN_BYTES must be 1 or 2, got $TERN_BYTES")
 const ROT_DEFAULT = 3.0
 
 # ---- tables: fmap.paths -> rotation system (rot.eul) + one fmap.ve.sp2p per type pair ----
@@ -35,6 +33,7 @@ struct NativeGrid
     n_types::Int
     blens::Vector{Int}
     angle_indices::Vector{Int16}
+    tern::Int                  # cell format of the grids (read from the files): 1 summed channel, 2 [elec, vdw]
 end
 
 const ROT_FILE_CACHE = Dict{Tuple{String,Int},RotTables}()
@@ -45,7 +44,11 @@ function load_rot_file(path::String)
     return ROT_FILE_CACHE[key] = rot_tables_from_eul(path; mode)
 end
 
-function load_fmap_paths_native(paths_file::String, n_types::Int; device::Int = 0)
+# spt: 2 = the sp2p blob read in place (default: 7x less device memory for the N=200 grid, about 3% slower), 1 = lookup table built on the device (fastest, larger);
+# use_float: lookup arithmetic in float (same energies). Defaults from FMAP_SPT / FMAP_FLOAT.
+function load_fmap_paths_native(paths_file::String, n_types::Int; device::Int = 0,
+                                spt::Int = parse(Int, get(ENV, "FMAP_SPT", "2")),
+                                use_float::Bool = get(ENV, "FMAP_FLOAT", "0") == "1")
     n_ctx = n_types * (n_types + 1) ÷ 2
     lines = readlines(paths_file)
     length(lines) >= 2 * n_ctx || error("$paths_file needs $(2*n_ctx) lines (rot/ve x $n_ctx contexts), got $(length(lines))")
@@ -60,13 +63,14 @@ function load_fmap_paths_native(paths_file::String, n_types::Int; device::Int = 
     tab = GC.@preserve ves begin
         cptrs = Cstring[Base.unsafe_convert(Cstring, s) for s in ves]
         ccall(fsim_sym(:fsim_tab_open), Ptr{Cvoid},
-              (Cint, Cint, Cint, Cint, Ptr{Int16}, Ptr{Int16}, Ptr{Float64}, Cint, Ptr{Cstring}, Cint),
-              device, n_types, rt.nrot, rt.nbin, rt.aidx, rt.amap.dense, rt.rotm, n_ctx, cptrs, TERN_BYTES)
+              (Cint, Cint, Cint, Cint, Ptr{Int16}, Ptr{Int16}, Ptr{Float64}, Cint, Ptr{Cstring}, Cint, Cint),
+              device, n_types, rt.nrot, rt.nbin, rt.aidx, rt.amap.dense, rt.rotm, n_ctx, cptrs, spt, use_float)
     end
     tab == C_NULL && error("libfmapsim: ", fsim_error())
     scl = ccall(fsim_sym(:fsim_tab_scl), Float64, (Ptr{Cvoid},), tab)
     blens = [ccall(fsim_sym(:fsim_tab_blen), Cint, (Ptr{Cvoid}, Cint), tab, c - 1) for c in 1:n_ctx]
-    return NativeGrid(tab, rt.nrot, rt.nbin, scl, n_types, Int.(blens), rt.aidx)
+    tern = Int(ccall(fsim_sym(:fsim_tab_tern), Cint, (Ptr{Cvoid},), tab))      # cell format, from the grid files
+    return NativeGrid(tab, rt.nrot, rt.nbin, scl, n_types, Int.(blens), rt.aidx, tern)
 end
 
 rot_index(g::NativeGrid, b1::Float64, b2::Float64, b3::Float64) =

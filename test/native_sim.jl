@@ -1,5 +1,6 @@
 # native_sim.jl - libfmapsim.so (CUDA C, no CUDA.jl) against the CPU engine on a real grid.
-#   julia --project=. test/native_sim.jl <work dir with rot.eul, fmap.ve.sp2p, fmap.paths>     (needs a GPU node; TERN_BYTES as the grid)
+#   julia --project=. test/native_sim.jl <work dir with rot.eul, fmap.ve.sp2p, fmap.paths>     (needs a GPU node)
+#   FMAP_SPT=1 (lookup table) and FMAP_FLOAT=1 (float lookup) select the other table layout / precision (default: SPT=2p in place, double); every combination must pass
 # 1. total energy of random placements: the library's sum equals the CPU engine's sum of pair energies (same lookup, same pair order);
 # 2. a short run (displacement + same-box insertion moves): the energy tracked from the move deltas equals the total energy recomputed
 #    on the device and by the CPU engine at the end, and every molecule keeps a valid rotation index.
@@ -13,8 +14,8 @@ paths = joinpath(wd, "fmap.paths")
 cd(wd)
 g = load_fmap_paths_native(paths, 1)
 @printf("grid: nrot %d nbin %d scl %.4f blen %d\n", g.nrot, g.nbin, g.scl, g.blens[1])
-tern = TERN_BYTES
-c = FmapSim.fmap_create("rot.eul", "fmap.ve.sp2p"; tern)          # CPU engine, same file
+c = FmapSim.fmap_create("rot.eul", "fmap.ve.sp2p")          # CPU engine, same file
+@test g.tern == c.tern                                   # cell format read from the same file header
 L = 619.65; N = 200; kT = 0.5924; box = (L, L, L)
 
 function cpu_total(pos, ridx)

@@ -2,7 +2,7 @@
 #
 #   rot.eul:       Euler-angle list of the sample set; the rotation tables are built from it (see ../rotsys.jl)
 #   fmap.ve.sp2p:  spatially compressed energy grid, one independent unit per rotation (see ../../spt/Spt.jl)
-#   The energy grid is held as the SPT=1 block-sparse table (Spt.sparse1_table), never dense.
+#   The energy grid is held as the sp2p blob itself (SPT=2p, Spt.sp2p_ve; default) or as the SPT=1 block-sparse table (Spt.sparse1_table), never dense.
 
 const FMAP_MAX_NROT = 40000
 const FMAP_MAX_DIM  = 1024
@@ -54,34 +54,38 @@ struct FmapCtx
     aidx::Vector{Int16}
     amap::AMapC
     rotm::Vector{Float64}
-    energy::Vector{Int8}   # SPT=1 block-sparse table (Spt.sparse1_table), read-only
+    spt::Int               # layout of energy: 2 = the sp2p blob read in place (SPT=2p), 1 = block-sparse lookup table (SPT=1)
+    energy::Vector{Int8}   # the table (Spt.sp2p_blob or Spt.sparse1_table), read-only
 end
 
 with_scales(c::FmapCtx, es, vs) =
     FmapCtx(c.nrot, c.blen, c.nbin, c.scl, c.rcut2, c.tern, Float64(es), Float64(vs),
-            c.aidx, c.amap, c.rotm, c.energy)
+            c.aidx, c.amap, c.rotm, c.spt, c.energy)
 
 """
-    fmap_create(rot_path, ve_path; tern) -> FmapCtx
+    fmap_create(rot_path, ve_path) -> FmapCtx
 
-Load one pair context (CPU engine): the rotation tables and the energy grid, a `.sp2p` file turned into the block-sparse lookup table
-(SPT=1) directly from the compressed units, as on the GPU. No dense grid is made.
+Load one pair context (CPU engine): the rotation tables and the energy grid of a `.sp2p` file, used in place (`spt = 2`, SPT=2p, default: small)
+or turned into the block-sparse lookup table (`spt = 1`, SPT=1: faster, larger) directly from the compressed units. No dense grid is made.
+`spt` defaults to the environment variable `FMAP_SPT`, as on the GPU.
 """
-function fmap_create(rot_path::AbstractString, ve_path::AbstractString; tern::Integer = tern_bytes_from_env())
+function fmap_create(rot_path::AbstractString, ve_path::AbstractString; spt::Integer = parse(Int, get(ENV, "FMAP_SPT", "2")))
+    spt in (1, 2) || error("FMAP_SPT must be 1 or 2, got $spt")
     rt = read_rot_tables(rot_path)
     Spt.is_sp2p(ve_path) || error("FMAP: $ve_path is not a spatially compressed grid (fmap.ve.sp2p)")
     nrot_v, blen, spacing, ftern = Spt.read_sp2p_header(ve_path)
     nrot_v == rt.nrot || error("FMAP: nrot mismatch: rot=$(rt.nrot) ve=$nrot_v")
     fmap_geometry_ok(rt.nrot, rt.nbin, blen) || error("FMAP: implausible blen=$blen in $ve_path")
-    ftern == tern || error("FMAP: $ve_path holds a TERN_BYTES=$ftern grid but TERN_BYTES=$tern is set")
+    tern = ftern                                      # cell format from the file header
     t0 = time()
-    energy = Spt.sparse1_table(Spt.read_sp2p(ve_path))
+    f = Spt.read_sp2p(ve_path)
+    energy = spt == 2 ? Spt.sp2p_blob(f) : Spt.sparse1_table(f)
     scl = 1.0 / spacing
     rcut = blen * 0.5 * spacing
     println("FMAP: nrot=$(rt.nrot) blen=$blen nbin=$(rt.nbin) scl=$(@sprintf("%.4f", scl)) rcut=$(@sprintf("%.4f", rcut)); " *
-            "SPT=1 table $(round(length(energy) / 1e6, digits = 1)) MB in $(round(time() - t0, digits = 1)) s")
+            "$(spt == 2 ? "SPT=2p blob" : "SPT=1 table") $(round(length(energy) / 1e6, digits = 1)) MB in $(round(time() - t0, digits = 1)) s")
     return FmapCtx(rt.nrot, blen, rt.nbin, scl, rcut * rcut, Int(tern), 1.0, 1.0,
-                   rt.aidx, rt.amap, rt.rotm, energy)
+                   rt.aidx, rt.amap, rt.rotm, Int(spt), energy)
 end
 
 # ---- hot path ----
@@ -106,7 +110,7 @@ end
         j = unsafe_trunc(Int, muladd(ry, c.scl, h) + 0.5)
         k = unsafe_trunc(Int, muladd(rz, c.scl, h) + 0.5)
         (i < 0 || i >= blen || j < 0 || j >= blen || k < 0 || k >= blen) && return 0.0
-        e0, e1 = Spt.sp1_ve(c.energy, blen, c.nrot, i, j, k, a3)
+        e0, e1 = c.spt == 2 ? Spt.sp2p_ve(c.energy, blen, i, j, k, a3) : Spt.sp1_ve(c.energy, blen, c.nrot, i, j, k, a3)
         e0 == TERN_MAX && return 9999.0
         c.tern == 2 && return muladd(Float64(e0), c.elec_scale, Float64(e1) * c.vdw_scale) / TERN_SCL
         return Float64(e0) / TERN_SCL

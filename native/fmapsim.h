@@ -4,7 +4,7 @@
  * re-inserted at a random place), reservoir insertion that fills a start-up deficit, random placement, total energy. The caller (any host
  * language) keeps the run logic: step-size adaptation, logs, trajectory files. A wrapper only passes arrays and calls:
  *
- *     fsim_tab *t  = fsim_tab_open(0, 1, nrot, nbin, aidx, amap, rotm, 1, paths, 1);     // tables + energy grid, once per run
+ *     fsim_tab *t  = fsim_tab_open(0, 1, nrot, nbin, aidx, amap, rotm, 1, paths, 1, 0);     // tables + energy grid, once per run
  *     fsim_box *b  = fsim_box_open(t, cap, box, kT, 1.0, 1.0);                             // one per replica (own stream and RNG)
  *     fsim_box_set(b, n, pos, bins, ridx, ptype, seed);
  *     fsim_mc_launch(b, n, steps, js, rs);   fsim_wait(b, mc6, NULL, NULL);               // many boxes can be launched, then waited
@@ -31,12 +31,14 @@ const char *fsim_error(void);
 int fsim_device_count(void);
 
 /* Tables on `device`: the rotation tables (aidx [nbin^3] i16, amap [nrot^2] i16, rotm [nrot*9] f64, all host arrays that are copied) and one
- * energy grid file (fmap.ve.sp2p) per context, n_ctx = n_types*(n_types+1)/2 sorted type pairs. `tern` is the cell format the grids were made with
- * (1 summed channel, 2 elec + vdw) and must match the files. The files are expanded on the device into the lookup table (SPT=1). */
+ * energy grid file (fmap.ve.sp2p) per context, n_ctx = n_types*(n_types+1)/2 sorted type pairs. The cell format (1 summed channel, 2 elec + vdw) is read from the
+ * files and must be the same in all of them (fsim_tab_tern). The files are expanded on the device into the lookup table (spt = 1, fastest, larger) or, with spt = 2 (the Julia driver's default), used in place (SPT=2p, 7x smaller for the N=200
+ * grid, about 3% slower); use_float = 1 does the lookup arithmetic in float (same energies, see fmap_core.h). */
 fsim_tab *fsim_tab_open(int device, int n_types, int nrot, int nbin, const int16_t *aidx, const int16_t *amap, const double *rotm,
-                        int n_ctx, const char *const *sp2p_paths, int tern);
+                        int n_ctx, const char *const *sp2p_paths, int spt, int use_float);
 void fsim_tab_close(fsim_tab *t);
-double fsim_tab_scl(const fsim_tab *t);                   /* 1 / grid spacing */
+double fsim_tab_scl(const fsim_tab *t);
+int fsim_tab_tern(const fsim_tab *t);                     /* cell format of the grids, from the files: 1 summed channel, 2 elec + vdw */                   /* 1 / grid spacing */
 int fsim_tab_blen(const fsim_tab *t, int ctx);
 int fsim_rot_index(const fsim_tab *t, double b1, double b2, double b3);   /* rotation index of orientation bins (host) */
 

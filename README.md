@@ -16,11 +16,12 @@ Pipeline (one command, `bin/fmapiq.jl`):
 ## Requirements
 - Julia ≥ 1.9 (developed and tested with 1.12).
 - GPU mode: an NVIDIA GPU with driver and the CUDA toolkit once, to build the libraries in `native/` (`module load CUDA && make -C native`); Julia itself needs no CUDA package. Memory: about 6 GB for the
-  energy maps and the N=200 example; the N=800 example was run on a 46 GB L40 (984³ FFT grid; smaller cards untested).
-- CPU mode works without a GPU but is much slower. Measured on 8 cores (N=200): energy maps about 19 min,
-  then about 40 s per I(q); the Monte Carlo run time of 20000 cycles per replica on the CPU was not benchmarked.
-- Disk: about 0.4 GB per work directory (`fmap.ve.sp2p`). Both engines (GPU and CPU) turn it directly into the block-sparse
-  lookup table (SPT=1), about 2.7 GB for the N=200 example instead of the 5.7 GB dense grid; a dense grid is never made.
+  energy maps and the N=200 example; the N=800 example needs about 23 GB for its 984³ I(q) grid and was run on a 46 GB L40.
+- CPU mode works without a GPU and takes about 6 times longer for the N=200 example (12.5 min against 2 min). Measured on 8 cores (N=200): energy maps about 9.5 min,
+  Monte Carlo of 20000 cycles about 36 s per replica (2 threads each), then about 40 s per I(q); the whole example takes 12.5 min.
+- Disk: about 0.4 GB per work directory (`fmap.ve.sp2p`). Both simulation engines (GPU and CPU) read the file in place (SPT=2p),
+  about 0.4 GB of memory for the N=200 example instead of the 5.7 GB dense grid; a dense grid is never made.
+  `FMAP_SPT=1` (environment) expands it into the block-sparse lookup table instead, about 2.7 GB, about 3% faster (GPU, N=800).
 - Python (numpy) is only needed for the optional `tools/traj2pdb.py`; no C extension anywhere.
 
 ## Native GPU libraries (no CUDA.jl)
@@ -104,8 +105,10 @@ docs/        notes on the pipeline options
 ```
 
 ## Notes
-- `TERN_BYTES` (environment, default 1 in the pipeline) selects the grid cell format; stand-alone tools
-  default to 2, so export `TERN_BYTES=1` when running `simulation_nvt*` on a pipeline grid.
+- `TERN_BYTES` (environment, default 1 in the pipeline) selects the cell format when the grid is made; the simulation
+  tools read it from the `fmap.ve.sp2p` header, so nothing has to be set for them.
+- `FMAP_SPT` (environment, default 2) selects the table layout of the simulation engines, 2 = `fmap.ve.sp2p` read in place, 1 = block-sparse
+  lookup table; `FMAP_FLOAT=1` does the GPU lookup arithmetic in float. All settings give the same energies.
 - GPU results are reproducible to numerical noise (atomic adds in the grid mapping), not bit-for-bit.
 - Orientation lookup: the beta bin index is `floor(b2)` clamped to `nbin-1` (the `angijk` tables use half-bin beta
   centres); earlier versions used `round(b2)` with wrap, which sent beta near pi to beta near 0. The result

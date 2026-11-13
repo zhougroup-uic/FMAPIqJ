@@ -7,13 +7,6 @@ const MAX_N_CTXS = 15
 const TWO_PI = 2.0 * pi
 
 
-"Grid cell format from the environment, as the C builds' -DTERN_BYTES: 2 = [elec,vdw], 1 = pre-summed."
-function tern_bytes_from_env()
-    tb = parse(Int, get(ENV, "TERN_BYTES", "2"))
-    tb in (1, 2) || error("TERN_BYTES must be 1 or 2, got $tb")
-    return tb
-end
-
 # ---- LCG (glibc constants, 31-bit state), identical to lcg_random / lcg_next_dev ----
 
 mutable struct LCG
@@ -118,7 +111,7 @@ function tern_check_scales(tern::Integer, es::Real, vs::Real)
         _tern_warned[] = true
         println(stderr, "Warning: elec_scale=$es vdw_scale=$vs requested but NOT applied - this run uses the 1-byte tErn format ",
                 "(TERN_BYTES=1): elec+vdw are pre-summed in the grid, so there is no separate channel to scale; the lookup runs as ",
-                "if both were 1.0. kT (TSIM/TSIMS) still varies correctly. Use TERN_BYTES=2 (and a 2-channel grid) to use them. ",
+                "if both were 1.0. kT (TSIM/TSIMS) still varies correctly. Make the grid with TERN_BYTES=2 to use them. ",
                 "(Printed once per process.)")
     end
     return nothing
