@@ -360,6 +360,7 @@ __global__ void total_energy_kernel(fmap_tab t, BoxArgs b, double *out) {
 __device__ __forceinline__ unsigned ld32(const int8_t *w, long long byteoff) { unsigned v; __builtin_memcpy(&v, w + byteoff, 4); return v; }
 __device__ __forceinline__ int cnt_mixed(unsigned x) { return __popc((x >> 1) & ~x & 0x55555555u); }
 #define SP_PH 16
+#define FSIM_SP_MODE_2P 34          // mode field of a per-rotation sparse table (SPT=2p) = 2 + 32 (SP_MODE_2P in Spt.jl)
 
 __global__ void sp1_scan_kernel(uint8_t *cls, int *stored, const int8_t *w2p, int nrot, long long nblk, int mapb) {
     long long blk = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -419,7 +420,7 @@ static int load_sp2p(const char *path, int nrot_expect, int spt, int8_t **sp, in
     uint32_t mode; int32_t nrot, bl; double sp_; uint64_t nbytes; uint32_t tern;
     memcpy(&mode, h + 8, 4); memcpy(&nrot, h + 12, 4); memcpy(&bl, h + 16, 4); memcpy(&sp_, h + 20, 8); memcpy(&nbytes, h + 28, 8); memcpy(&tern, h + 36, 4);
     if (tern == 0) tern = 2;
-    if (mode != 34) { fclose(f); return fail("fsim_tab_open", "only the per-rotation sparse table (SPT=2p) is supported"); }
+    if (mode != FSIM_SP_MODE_2P) { fclose(f); return fail("fsim_tab_open", "only the per-rotation sparse table (SPT=2p) is supported"); }
     if (nrot != nrot_expect) { fclose(f); return fail("fsim_tab_open", "nrot of the grid differs from the rotation tables"); }
     if (tern != 1 && tern != 2) { fclose(f); return fail("fsim_tab_open", "unknown cell format in the grid file"); }
     *tern_out = (int)tern;

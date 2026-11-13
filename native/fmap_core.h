@@ -26,8 +26,9 @@
 #define FMAP_HD
 #endif
 
-#define FMAP_TERN_MAX 127
-#define FMAP_TERN_SCL 8.0
+#define FMAP_TERN_MAX 127            /* cell value reserved for excluded volume (hard-core overlap); real values lie in [-127, 126] */
+#define FMAP_TERN_SCL 8.0            /* cell values are energies in units of 1/8 kcal/mol (0.125 kcal/mol) */
+#define FMAP_CLASH_ENERGY 9999.0     /* kcal/mol returned for a pair in overlap */
 #define FMAP_ROT_DEFAULT 3.0
 #define FMAP_MAX_CTX 15            /* contexts: sorted pairs of up to 5 molecule types */
 
@@ -169,7 +170,7 @@ FMAP_HD static inline void fmap_cell(const fmap_tab *t, int ctx, int i, int j, i
 
 /* energy of a looked-up cell pair [e0, e1] */
 FMAP_HD static inline double fmap_cell_energy(const fmap_tab *t, int e0, int e1, double es, double vs) {
-    if (e0 == FMAP_TERN_MAX) return 9999.0;
+    if (e0 == FMAP_TERN_MAX) return FMAP_CLASH_ENERGY;
     if (t->tern == 2) return ((double)e0 * es + (double)e1 * vs) / FMAP_TERN_SCL;
     return (double)e0 / FMAP_TERN_SCL;
 }

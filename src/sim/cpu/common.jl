@@ -1,7 +1,8 @@
 # common.jl - RNG, particle record, orientation-bin conversions (particle_fmap.c / fmap_energy.c).
 
-const TERN_SCL = 8.0          # tErn_SCL (tern.h)
-const TERN_MAX = Int8(127)    # tErn_MAX: excluded-volume sentinel in channel 0 / the single byte
+const TERN_SCL = 8.0          # tErn_SCL (tern.h): cell values are energies in units of 1/8 kcal/mol
+const TERN_MAX = Int8(127)    # tErn_MAX: excluded-volume sentinel in channel 0 / the single byte (real values lie in [-127, 126])
+const CLASH_ENERGY = 9999.0   # kcal/mol returned for a pair in overlap (FMAP_CLASH_ENERGY in native/fmap_core.h)
 const ROT_DEFAULT = 3.0       # rotation displacement in bin units (particle_fmap.c rot_default)
 const MAX_N_CTXS = 15
 const TWO_PI = 2.0 * pi

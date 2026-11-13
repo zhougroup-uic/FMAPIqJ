@@ -10,10 +10,6 @@ const FMAP_MAX_DIM  = 1024
 fmap_geometry_ok(nrot, nbin, blen) =
     0 < nrot <= FMAP_MAX_NROT && 0 < nbin <= FMAP_MAX_DIM && 0 < blen <= FMAP_MAX_DIM
 
-@inline rd_u32(h, o) = UInt32(h[o+1]) | UInt32(h[o+2]) << 8 | UInt32(h[o+3]) << 16 | UInt32(h[o+4]) << 24
-@inline rd_i32(h, o) = reinterpret(Int32, rd_u32(h, o))
-@inline rd_f64(h, o) = reinterpret(Float64, UInt64(rd_u32(h, o)) | UInt64(rd_u32(h, o + 4)) << 32)
-
 # ---- headers ----
 
 "Rotation-table header of a rot.eul: (nrot, nbin). Errors on a bad file."
@@ -111,7 +107,7 @@ end
         k = unsafe_trunc(Int, muladd(rz, c.scl, h) + 0.5)
         (i < 0 || i >= blen || j < 0 || j >= blen || k < 0 || k >= blen) && return 0.0
         e0, e1 = c.spt == 2 ? Spt.sp2p_ve(c.energy, blen, i, j, k, a3) : Spt.sp1_ve(c.energy, blen, c.nrot, i, j, k, a3)
-        e0 == TERN_MAX && return 9999.0
+        e0 == TERN_MAX && return CLASH_ENERGY
         c.tern == 2 && return muladd(Float64(e0), c.elec_scale, Float64(e1) * c.vdw_scale) / TERN_SCL
         return Float64(e0) / TERN_SCL
     end

@@ -26,6 +26,7 @@ export Sp2pWriter, Sp2pFile, sp2p_open, sp2p_add!, sp2p_close!, read_sp2p, is_sp
 
 const SP_MAGIC = b"SPTV"
 const SP_FILE_HDR = 48
+const SP_MODE_2P = UInt32(34)   # mode field of a per-rotation sparse table (SPT=2p) = 2 + 32
 const SP_PH = 16                 # unit table starts here in the blob (16 bytes per rotation)
 
 struct UnitLayout
@@ -176,7 +177,7 @@ function sp2p_close!(w::Sp2pWriter; quiet::Bool = false)
     length(w.tab) == 4 * w.nrot || error("sp2p_close!: $(length(w.tab) ÷ 4) of $(w.nrot) rotations written")
     seek(w.io, SP_FILE_HDR + w.base - 1); write(w.io, UInt8(0))    # pad the last unit
     seek(w.io, 0)
-    write(w.io, SP_MAGIC, UInt32(1), UInt32(2 + 32), Int32(w.nrot), Int32(w.blen), w.spacing, UInt64(w.base), UInt32(w.tern),
+    write(w.io, SP_MAGIC, UInt32(1), SP_MODE_2P, Int32(w.nrot), Int32(w.blen), w.spacing, UInt64(w.base), UInt32(w.tern),
           zeros(UInt8, SP_FILE_HDR - 40))
     write(w.io, Int32[w.nrot, w.nslt, 0, 0]); seek(w.io, SP_FILE_HDR + SP_PH); write(w.io, w.tab)
     close(w.io)
@@ -194,7 +195,7 @@ is_sp2p(path::AbstractString) = isfile(path) && open(io -> (m = read(io, 4); len
 function read_sp2p_header(path::AbstractString)
     h = open(io -> read(io, SP_FILE_HDR), path, "r")
     (length(h) == SP_FILE_HDR && h[1:4] == SP_MAGIC) || error("$path is not a sparse table file (fmap.ve.sp2p)")
-    rd32(h, 8) == UInt32(2 + 32) || error("$path: only the per-rotation table (SPT=2p) is supported, mode field $(rd32(h, 8))")
+    rd32(h, 8) == SP_MODE_2P || error("$path: only the per-rotation table (SPT=2p) is supported, mode field $(rd32(h, 8))")
     tern = Int(rd32(h, 36)); tern == 0 && (tern = 2)
     return Int(reinterpret(Int32, rd32(h, 12))), Int(reinterpret(Int32, rd32(h, 16))), reinterpret(Float64, rd64(h, 20)), tern
 end
